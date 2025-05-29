@@ -1,36 +1,52 @@
 // Handle messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  console.log('Received message:', request);
   if (request.action === 'startExport') {
+    console.log('Starting export process...');
     startExport()
-      .then(() => sendResponse({ success: true }))
-      .catch(error => sendResponse({ error: error.message }));
+      .then(() => {
+        console.log('Export completed successfully');
+        sendResponse({ success: true });
+      })
+      .catch(error => {
+        console.error('Export failed:', error);
+        sendResponse({ error: error.message });
+      });
     return true; // Required for async response
   }
 });
 
 async function startExport() {
   try {
+    console.log('Getting active tab...');
     // Get the active tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    console.log('Active tab:', tab);
     
     if (!tab.url.includes('teams.microsoft.com')) {
       throw new Error('Please navigate to Microsoft Teams in your browser');
     }
 
+    console.log('Extracting chat data...');
     // Extract chat data from the current page
     const chatData = await new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tab.id, { action: 'extractChat' }, (response) => {
         if (chrome.runtime.lastError) {
+          console.error('Error sending message to tab:', chrome.runtime.lastError);
           reject(new Error(chrome.runtime.lastError));
           return;
         }
+        console.log('Received chat data:', response);
         resolve(response);
       });
     });
 
+    console.log('Generating HTML...');
     // Generate HTML for the chat
     const html = generateChatHTML(chatData);
+    console.log('HTML generated, length:', html.length);
     
+    console.log('Saving chat to file...');
     // Save the HTML file
     await saveChatToFile(html, chatData.title);
 
@@ -39,6 +55,7 @@ async function startExport() {
       status: 'Export completed successfully!'
     });
   } catch (error) {
+    console.error('Error in startExport:', error);
     chrome.runtime.sendMessage({
       type: 'error',
       error: error.message
@@ -129,12 +146,20 @@ function generateAttachmentsHTML(attachments) {
 }
 
 async function saveChatToFile(html, chatName) {
-  const blob = new Blob([html], { type: 'text/html' });
-  const url = URL.createObjectURL(blob);
-  
-  await chrome.downloads.download({
-    url: url,
-    filename: `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.html`,
-    saveAs: false
-  });
+  try {
+    console.log('Creating data URL for chat:', chatName);
+    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+    console.log('Data URL created, length:', dataUrl.length);
+    
+    console.log('Initiating download...');
+    await chrome.downloads.download({
+      url: dataUrl,
+      filename: `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.html`,
+      saveAs: false
+    });
+    console.log('Download initiated successfully');
+  } catch (error) {
+    console.error('Error in saveChatToFile:', error);
+    throw error;
+  }
 } 
