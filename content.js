@@ -142,34 +142,112 @@ async function extractChatData() {
 }
 
 function extractMessagesFromText(text) {
+  if (!text) {
+    console.log('No text content provided');
+    return [];
+  }
+
   const messages = [];
   
-  // Pattern to match: "content by User Name [NH]"
-  const messagePattern = /(.+?) by ([^,\n]+(?:\[[^\]]+\])?)\s*([^by]*?)(?=\s+by\s|$)/g;
-  let match;
-
-  while ((match = messagePattern.exec(text)) !== null) {
-    const [_, content, user, timestampInfo] = match;
-    const trimmedContent = content.trim();
-    const trimmedUser = user.trim();
-
-    // Skip obvious UI elements
-    if (any(skip => trimmedContent.toLowerCase().includes(skip), ['chat', 'unread', 'meeting', 'recording'])) {
-      continue;
+  // Split text into lines for better processing
+  const lines = text.split('\n') || [];
+  
+  // Pattern to match message content and sender
+  const messagePattern = /^(.+?)\s+by\s+([^,\n]+(?:\[[^\]]+\])?)$/;
+  
+  // Pattern to match timestamps
+  const timePattern = /(\d{1,2}:\d{2}\s*(?:AM|PM)|Today|Yesterday|\d{1,2}\/\d{1,2}\/\d{4})/i;
+  
+  let currentMessage = null;
+  let currentSender = null;
+  let currentTimestamp = null;
+  let messageBuffer = [];
+  
+  try {
+    for (let i = 0; i < (lines?.length || 0); i++) {
+      const line = (lines[i] || '').trim();
+      
+      // Skip empty lines and UI elements
+      if (!line || line.length < 3 || 
+          any(skip => (line || '').toLowerCase().includes(skip), 
+              ['unread', 'meeting', 'recording', 'like reaction', 'user added', 'edited', 'begin reference'])) {
+        continue;
+      }
+      
+      // Check if this line contains a timestamp
+      const timeMatch = (line || '').match(timePattern);
+      if (timeMatch) {
+        // If we have a message in buffer, save it
+        if (messageBuffer?.length > 0 && currentSender) {
+          messages.push({
+            content: messageBuffer.join('\n'),
+            sender: currentSender,
+            timestamp: currentTimestamp || timeMatch[1],
+            type: 'message'
+          });
+          messageBuffer = [];
+        }
+        currentTimestamp = timeMatch[1];
+        continue;
+      }
+      
+      // Check if this line matches the message pattern
+      const messageMatch = (line || '').match(messagePattern);
+      if (messageMatch) {
+        // If we have a message in buffer, save it
+        if (messageBuffer?.length > 0 && currentSender) {
+          messages.push({
+            content: messageBuffer.join('\n'),
+            sender: currentSender,
+            timestamp: currentTimestamp || 'Unknown time',
+            type: 'message'
+          });
+          messageBuffer = [];
+        }
+        
+        // Start new message
+        currentMessage = (messageMatch[1] || '').trim();
+        currentSender = (messageMatch[2] || '').trim();
+        
+        // Only add to buffer if it's not a duplicate sender line
+        if (currentMessage && currentSender && !currentMessage.includes(currentSender)) {
+          messageBuffer.push(currentMessage);
+        }
+      } else if (currentMessage && currentSender) {
+        // This is a continuation of the current message
+        // Skip if the line is just the sender's name
+        if (line !== currentSender && !line.includes('by ' + currentSender)) {
+          messageBuffer.push(line);
+        }
+      }
     }
-
-    // Skip very short messages (likely UI elements)
-    if (trimmedContent.length > 10) {
+    
+    // Add the last message if exists
+    if (messageBuffer?.length > 0 && currentSender) {
       messages.push({
-        content: trimmedContent,
-        sender: trimmedUser,
-        timestamp: timestampInfo.trim(),
+        content: messageBuffer.join('\n'),
+        sender: currentSender,
+        timestamp: currentTimestamp || 'Unknown time',
         type: 'message'
       });
     }
+  } catch (error) {
+    console.error('Error processing messages:', error);
+    return []; // Return empty array on error
   }
-
-  return messages;
+  
+  // Filter out very short messages and UI elements
+  return messages.filter(msg => {
+    if (!msg || !msg.content || !msg.sender) return false;
+    
+    const content = (msg.content || '').toLowerCase();
+    return (msg.content || '').length > 10 && 
+           !any(skip => content.includes(skip), 
+                ['chat', 'unread', 'meeting', 'recording', 'like reaction', 'user added', 'edited', 'begin reference']) &&
+           (msg.sender || '').length > 0 &&
+           // Ensure sender is not the DAX Copilot description
+           !(msg.sender || '').includes('transcribing and documenting patient visits');
+  });
 }
 
 function extractUserInfo(text) {

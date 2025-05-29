@@ -23,7 +23,7 @@ async function startExport() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     console.log('Active tab:', tab);
     
-    if (!tab.url.includes('teams.microsoft.com')) {
+    if (!tab?.url?.includes('teams.microsoft.com')) {
       throw new Error('Please navigate to Microsoft Teams in your browser');
     }
 
@@ -33,13 +33,21 @@ async function startExport() {
       chrome.tabs.sendMessage(tab.id, { action: 'extractChat' }, (response) => {
         if (chrome.runtime.lastError) {
           console.error('Error sending message to tab:', chrome.runtime.lastError);
-          reject(new Error(chrome.runtime.lastError));
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!response) {
+          reject(new Error('No response from content script'));
           return;
         }
         console.log('Received chat data:', response);
         resolve(response);
       });
     });
+
+    if (!chatData || !chatData.messages) {
+      throw new Error('No chat data received');
+    }
 
     // If we have debug information, save it to a file
     if (chatData.debug) {
@@ -52,7 +60,7 @@ async function startExport() {
     // Split messages into sections of 100 messages each
     const MESSAGES_PER_SECTION = 100;
     const sections = [];
-    for (let i = 0; i < chatData.messages.length; i += MESSAGES_PER_SECTION) {
+    for (let i = 0; i < (chatData.messages?.length || 0); i += MESSAGES_PER_SECTION) {
       sections.push(chatData.messages.slice(i, i + MESSAGES_PER_SECTION));
     }
 
@@ -62,13 +70,13 @@ async function startExport() {
     for (let i = 0; i < sections.length; i++) {
       console.log(`Generating HTML for section ${i + 1}...`);
       const sectionHtml = generateChatHTML(chatData, i, sections[i]);
-      await saveChatToFile(sectionHtml, chatData.title, i);
+      await saveChatToFile(sectionHtml, chatData.title || 'untitled_chat', i);
     }
 
     // Generate and save index file
     console.log('Generating index file...');
     const indexHtml = generateIndexHTML(chatData, sections.length);
-    await saveChatToFile(indexHtml, `${chatData.title}_index`);
+    await saveChatToFile(indexHtml, `${chatData.title || 'untitled_chat'}_index`);
 
     chrome.runtime.sendMessage({
       type: 'complete',
@@ -78,7 +86,7 @@ async function startExport() {
     console.error('Error in startExport:', error);
     chrome.runtime.sendMessage({
       type: 'error',
-      error: error.message
+      error: error.message || 'Unknown error occurred'
     });
     throw error;
   }
@@ -167,7 +175,12 @@ function generateDebugHTML(chatData) {
 }
 
 function generateChatHTML(chatData, sectionIndex = null, sectionMessages = null) {
-  const messages = sectionMessages || chatData.messages;
+  if (!chatData || !chatData.title) {
+    console.error('Invalid chat data:', chatData);
+    return '';
+  }
+
+  const messages = sectionMessages || chatData.messages || [];
   const title = sectionIndex !== null ? `${chatData.title} - Section ${sectionIndex + 1}` : chatData.title;
   
   let html = `
@@ -237,14 +250,16 @@ function generateChatHTML(chatData, sectionIndex = null, sectionMessages = null)
   `;
 
   messages.forEach(message => {
+    if (!message) return;
+    
     html += `
       <div class="message">
         <div class="message-header">
-          <span class="sender">${message.sender}</span>
-          <span class="timestamp">${message.timestamp}</span>
+          <span class="sender">${message.sender || 'Unknown'}</span>
+          <span class="timestamp">${message.timestamp || 'Unknown time'}</span>
         </div>
-        <div class="message-content">${message.content}</div>
-        ${message.attachments.length > 0 ? generateAttachmentsHTML(message.attachments) : ''}
+        <div class="message-content">${message.content || ''}</div>
+        ${(message.attachments && message.attachments.length > 0) ? generateAttachmentsHTML(message.attachments) : ''}
       </div>
     `;
   });
@@ -308,13 +323,16 @@ function generateIndexHTML(chatData, sectionCount) {
 }
 
 function generateAttachmentsHTML(attachments) {
-  if (!attachments || attachments.length === 0) return '';
+  if (!attachments || !Array.isArray(attachments) || attachments.length === 0) return '';
   
-  return attachments.map(attachment => `
-    <div class="attachment">
-      <a href="${attachment.url}" target="_blank">${attachment.name}</a>
-    </div>
-  `).join('');
+  return attachments.map(attachment => {
+    if (!attachment || !attachment.url || !attachment.name) return '';
+    return `
+      <div class="attachment">
+        <a href="${attachment.url}" target="_blank">${attachment.name}</a>
+      </div>
+    `;
+  }).join('');
 }
 
 async function saveChatToFile(html, chatName, sectionIndex = null) {
