@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "Microsoft Teams Chat Exporter",
+  "version": "1.0",
+  "description": "Export Microsoft Teams chat conversations to HTML format",
+  "permissions": [
+    "storage",
+    "downloads",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.teams.microsoft.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.teams.microsoft.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+} 
