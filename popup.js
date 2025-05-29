@@ -13,15 +13,21 @@ document.addEventListener('DOMContentLoaded', function() {
 
       // Send message to background script to start export
       chrome.runtime.sendMessage({ action: 'startExport' }, (response) => {
-        if (response.error) {
-          status.textContent = `Error: ${response.error}`;
+        if (chrome.runtime.lastError) {
+          status.textContent = `Error: ${chrome.runtime.lastError.message}`;
+          exportBtn.disabled = false;
+          progress.style.display = 'none';
+          return;
+        }
+        if (response && response.error) {
+          status.textContent = `Error: ${typeof response.error === 'object' ? response.error.message || JSON.stringify(response.error) : response.error}`;
           exportBtn.disabled = false;
           progress.style.display = 'none';
           return;
         }
       });
     } catch (error) {
-      status.textContent = `Error: ${error.message}`;
+      status.textContent = `Error: ${error.message || error.toString()}`;
       exportBtn.disabled = false;
       progress.style.display = 'none';
     }
@@ -37,7 +43,7 @@ document.addEventListener('DOMContentLoaded', function() {
       exportBtn.disabled = false;
       progress.style.display = 'none';
     } else if (message.type === 'error') {
-      status.textContent = `Error: ${message.error}`;
+      status.textContent = `Error: ${typeof message.error === 'object' ? message.error.message || JSON.stringify(message.error) : message.error}`;
       exportBtn.disabled = false;
       progress.style.display = 'none';
     }

@@ -41,14 +41,34 @@ async function startExport() {
       });
     });
 
-    console.log('Generating HTML...');
-    // Generate HTML for the chat
-    const html = generateChatHTML(chatData);
-    console.log('HTML generated, length:', html.length);
-    
-    console.log('Saving chat to file...');
-    // Save the HTML file
-    await saveChatToFile(html, chatData.title);
+    // If we have debug information, save it to a file
+    if (chatData.debug) {
+      console.log('Saving debug information...');
+      const debugHtml = generateDebugHTML(chatData);
+      await saveChatToFile(debugHtml, 'teams_debug_info');
+      return;
+    }
+
+    // Split messages into sections of 100 messages each
+    const MESSAGES_PER_SECTION = 100;
+    const sections = [];
+    for (let i = 0; i < chatData.messages.length; i += MESSAGES_PER_SECTION) {
+      sections.push(chatData.messages.slice(i, i + MESSAGES_PER_SECTION));
+    }
+
+    console.log(`Splitting chat into ${sections.length} sections...`);
+
+    // Generate and save section files
+    for (let i = 0; i < sections.length; i++) {
+      console.log(`Generating HTML for section ${i + 1}...`);
+      const sectionHtml = generateChatHTML(chatData, i, sections[i]);
+      await saveChatToFile(sectionHtml, chatData.title, i);
+    }
+
+    // Generate and save index file
+    console.log('Generating index file...');
+    const indexHtml = generateIndexHTML(chatData, sections.length);
+    await saveChatToFile(indexHtml, `${chatData.title}_index`);
 
     chrome.runtime.sendMessage({
       type: 'complete',
@@ -64,13 +84,98 @@ async function startExport() {
   }
 }
 
-function generateChatHTML(chatData) {
+function generateDebugHTML(chatData) {
   let html = `
     <!DOCTYPE html>
     <html>
     <head>
       <meta charset="UTF-8">
-      <title>${chatData.title} - Teams Chat Export</title>
+      <title>Teams Debug Information</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          max-width: 1200px;
+          margin: 0 auto;
+          padding: 20px;
+          line-height: 1.6;
+        }
+        .section {
+          margin: 20px 0;
+          padding: 20px;
+          border: 1px solid #ddd;
+          border-radius: 4px;
+        }
+        .element {
+          margin: 10px 0;
+          padding: 10px;
+          background-color: #f5f5f5;
+          border-radius: 4px;
+        }
+        .path {
+          color: #666;
+          font-family: monospace;
+          margin-bottom: 5px;
+        }
+        .attributes {
+          color: #0066cc;
+          font-family: monospace;
+        }
+        .content {
+          margin-top: 5px;
+          white-space: pre-wrap;
+        }
+        .potential-chat {
+          background-color: #e6f3ff;
+        }
+      </style>
+    </head>
+    <body>
+      <h1>Teams Debug Information</h1>
+      <div class="section">
+        <h2>URL</h2>
+        <p>${chatData.debug.url}</p>
+      </div>
+      
+      <div class="section">
+        <h2>Potential Chat Elements</h2>
+        ${chatData.debug.potentialChatElements.map(el => `
+          <div class="element potential-chat">
+            <div class="path">${el.path}</div>
+            <div class="attributes">${el.attributes}</div>
+            ${el.textContent ? `<div class="content">${el.textContent}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="section">
+        <h2>All Elements</h2>
+        ${chatData.debug.elementsInfo.map(el => `
+          <div class="element">
+            <div class="path">${el.path}</div>
+            <div class="attributes">
+              ${Object.entries(el.attributes).map(([key, value]) => `${key}="${value}"`).join(' ')}
+            </div>
+            ${el.textContent ? `<div class="content">${el.textContent}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    </body>
+    </html>
+  `;
+
+  return html;
+}
+
+function generateChatHTML(chatData, sectionIndex = null, sectionMessages = null) {
+  const messages = sectionMessages || chatData.messages;
+  const title = sectionIndex !== null ? `${chatData.title} - Section ${sectionIndex + 1}` : chatData.title;
+  
+  let html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>${title} - Teams Chat Export</title>
       <style>
         body {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -106,14 +211,32 @@ function generateChatHTML(chatData) {
           max-width: 100%;
           height: auto;
         }
+        .navigation {
+          margin: 20px 0;
+          padding: 10px;
+          background-color: #f0f0f0;
+          border-radius: 4px;
+        }
+        .navigation a {
+          color: #464775;
+          text-decoration: none;
+          margin-right: 15px;
+        }
+        .navigation a:hover {
+          text-decoration: underline;
+        }
       </style>
     </head>
     <body>
-      <h1>${chatData.title}</h1>
+      <div class="navigation">
+        <a href="index.html">Back to Index</a>
+        ${sectionIndex !== null ? `<a href="section_${sectionIndex}.html">Current Section</a>` : ''}
+      </div>
+      <h1>${title}</h1>
       <div class="chat-messages">
   `;
 
-  chatData.messages.forEach(message => {
+  messages.forEach(message => {
     html += `
       <div class="message">
         <div class="message-header">
@@ -135,6 +258,55 @@ function generateChatHTML(chatData) {
   return html;
 }
 
+function generateIndexHTML(chatData, sectionCount) {
+  let html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>${chatData.title} - Teams Chat Export Index</title>
+      <style>
+        body {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          max-width: 800px;
+          margin: 0 auto;
+          padding: 20px;
+          line-height: 1.6;
+        }
+        .section-link {
+          display: block;
+          margin: 10px 0;
+          padding: 10px;
+          background-color: #f5f5f5;
+          border-radius: 4px;
+          color: #464775;
+          text-decoration: none;
+        }
+        .section-link:hover {
+          background-color: #e0e0e0;
+        }
+      </style>
+    </head>
+    <body>
+      <h1>${chatData.title} - Chat Sections</h1>
+      <div class="sections">
+  `;
+
+  for (let i = 0; i < sectionCount; i++) {
+    html += `
+      <a href="section_${i}.html" class="section-link">Section ${i + 1}</a>
+    `;
+  }
+
+  html += `
+      </div>
+    </body>
+    </html>
+  `;
+
+  return html;
+}
+
 function generateAttachmentsHTML(attachments) {
   if (!attachments || attachments.length === 0) return '';
   
@@ -145,16 +317,20 @@ function generateAttachmentsHTML(attachments) {
   `).join('');
 }
 
-async function saveChatToFile(html, chatName) {
+async function saveChatToFile(html, chatName, sectionIndex = null) {
   try {
     console.log('Creating data URL for chat:', chatName);
     const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
     console.log('Data URL created, length:', dataUrl.length);
     
+    const filename = sectionIndex !== null 
+      ? `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}_section_${sectionIndex}.html`
+      : `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.html`;
+    
     console.log('Initiating download...');
     await chrome.downloads.download({
       url: dataUrl,
-      filename: `${chatName.replace(/[^a-z0-9]/gi, '_').toLowerCase()}.html`,
+      filename: filename,
       saveAs: false
     });
     console.log('Download initiated successfully');

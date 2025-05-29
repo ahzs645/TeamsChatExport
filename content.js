@@ -1,147 +1,245 @@
+// Function to wait for an element to be present in the DOM
+function waitForElement(selectors, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    // Check if any of the selectors match immediately
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) {
+        console.log(`Found element with selector: ${selector}`);
+        return resolve(element);
+      }
+    }
+
+    const observer = new MutationObserver(() => {
+      for (const selector of selectors) {
+        const element = document.querySelector(selector);
+        if (element) {
+          console.log(`Found element with selector: ${selector}`);
+          observer.disconnect();
+          return resolve(element);
+        }
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+
+    setTimeout(() => {
+      observer.disconnect();
+      reject(new Error(`Timeout waiting for elements: ${selectors.join(', ')}`));
+    }, timeout);
+  });
+}
+
+// Function to get all elements with their attributes and content
+function getAllElementsInfo() {
+  const elements = document.querySelectorAll('*');
+  const elementsInfo = [];
+
+  elements.forEach(element => {
+    // Get all attributes
+    const attributes = {};
+    for (const attr of element.attributes) {
+      attributes[attr.name] = attr.value;
+    }
+
+    // Get computed styles that might be relevant
+    const style = window.getComputedStyle(element);
+    const relevantStyles = {
+      display: style.display,
+      visibility: style.visibility,
+      position: style.position,
+      zIndex: style.zIndex
+    };
+
+    // Get element's text content if it's not empty
+    const textContent = element.textContent?.trim();
+    
+    // Get element's HTML content
+    const innerHTML = element.innerHTML;
+
+    elementsInfo.push({
+      tagName: element.tagName,
+      id: element.id,
+      className: element.className,
+      attributes,
+      styles: relevantStyles,
+      textContent: textContent || null,
+      innerHTML: innerHTML || null,
+      path: getElementPath(element)
+    });
+  });
+
+  return elementsInfo;
+}
+
+// Function to get the full DOM path to an element
+function getElementPath(element) {
+  const path = [];
+  while (element && element.nodeType === Node.ELEMENT_NODE) {
+    let selector = element.nodeName.toLowerCase();
+    if (element.id) {
+      selector += `#${element.id}`;
+    } else if (element.className) {
+      // Handle both string and DOMTokenList className types
+      const classes = typeof element.className === 'string' 
+        ? element.className.split(' ')
+        : Array.from(element.className);
+      if (classes.length > 0) {
+        selector += `.${classes.join('.')}`;
+      }
+    }
+    path.unshift(selector);
+    element = element.parentNode;
+  }
+  return path.join(' > ');
+}
+
 // Function to extract chat data from the current page
-function extractChatData() {
+async function extractChatData() {
   console.log('Starting chat data extraction...');
   
-  // Debug: Log all possible chat title elements
-  const possibleTitleElements = [
-    document.querySelector('[data-tid="chat-header-title"]'),
-    document.querySelector('[data-tid="chat-title"]'),
-    document.querySelector('[data-tid="chat-header"]'),
-    document.querySelector('.chat-header'),
-    document.querySelector('.chat-title')
-  ];
-  console.log('Possible title elements:', possibleTitleElements);
+  try {
+    // Log the current URL to verify we're on Teams
+    console.log('Current URL:', window.location.href);
+    
+    // Get all text content from the page
+    const pageContent = document.body.innerText;
+    console.log('Page content length:', pageContent.length);
 
-  const chatData = {
-    title: document.querySelector('[data-tid="chat-header-title"]')?.textContent?.trim() || 
-           document.querySelector('[data-tid="chat-title"]')?.textContent?.trim() ||
-           document.querySelector('.chat-header')?.textContent?.trim() ||
-           'Unknown Chat',
-    messages: []
-  };
+    // Extract messages using pattern matching
+    const messages = extractMessagesFromText(pageContent);
+    console.log('Extracted messages:', messages);
 
-  console.log('Found chat title:', chatData.title);
+    // Extract user info
+    const userInfo = extractUserInfo(pageContent);
+    console.log('User info:', userInfo);
 
-  // Get all message elements - try different selectors
-  const messageSelectors = [
-    '[data-tid="message-container"]',
-    '[data-tid="message"]',
-    '.message-container',
-    '.message'
-  ];
+    // Extract chat list
+    const chatList = extractChatList(pageContent);
+    console.log('Chat list:', chatList);
 
-  let messageElements = [];
-  for (const selector of messageSelectors) {
-    const elements = document.querySelectorAll(selector);
-    console.log(`Found ${elements.length} messages with selector: ${selector}`);
-    if (elements.length > 0) {
-      messageElements = elements;
-      break;
+    // Get the chat title from the page
+    const title = document.title.replace(' | Microsoft Teams', '').trim();
+
+    return {
+      title: title,
+      messages: messages,
+      userInfo: userInfo,
+      chatList: chatList,
+      timestamp: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error('Error extracting chat data:', error);
+    return {
+      title: 'Error Extracting Chat',
+      messages: [],
+      error: error.message
+    };
+  }
+}
+
+function extractMessagesFromText(text) {
+  const messages = [];
+  
+  // Pattern to match: "content by User Name [NH]"
+  const messagePattern = /(.+?) by ([^,\n]+(?:\[[^\]]+\])?)\s*([^by]*?)(?=\s+by\s|$)/g;
+  let match;
+
+  while ((match = messagePattern.exec(text)) !== null) {
+    const [_, content, user, timestampInfo] = match;
+    const trimmedContent = content.trim();
+    const trimmedUser = user.trim();
+
+    // Skip obvious UI elements
+    if (any(skip => trimmedContent.toLowerCase().includes(skip), ['chat', 'unread', 'meeting', 'recording'])) {
+      continue;
+    }
+
+    // Skip very short messages (likely UI elements)
+    if (trimmedContent.length > 10) {
+      messages.push({
+        content: trimmedContent,
+        sender: trimmedUser,
+        timestamp: timestampInfo.trim(),
+        type: 'message'
+      });
     }
   }
 
-  console.log('Total messages found:', messageElements.length);
+  return messages;
+}
+
+function extractUserInfo(text) {
+  // Look for "(You)" pattern to identify current user
+  const youPattern = /([^,\n]+\s+\(You\))/;
+  const match = text.match(youPattern);
   
-  messageElements.forEach((element, index) => {
-    console.log(`Processing message ${index + 1}`);
+  const currentUser = match ? match[1] : null;
+  
+  return {
+    currentUser: currentUser,
+    organization: text.includes('[NH]') ? 'Northern Health' : null
+  };
+}
+
+function extractChatList(text) {
+  const chats = [];
+  const lines = text.split('\n');
+  
+  const chatIndicators = ['PM', 'AM', 'You:', 'Unread', 'Recording is ready'];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
     
-    // Try different selectors for sender
-    const senderSelectors = [
-      '[data-tid="message-sender"]',
-      '[data-tid="sender"]',
-      '.message-sender',
-      '.sender'
-    ];
-    
-    let sender = 'Unknown';
-    for (const selector of senderSelectors) {
-      const senderElement = element.querySelector(selector);
-      if (senderElement?.textContent) {
-        sender = senderElement.textContent.trim();
-        break;
-      }
-    }
-
-    // Try different selectors for timestamp
-    const timestampSelectors = [
-      '[data-tid="message-timestamp"]',
-      '[data-tid="timestamp"]',
-      '.message-timestamp',
-      '.timestamp'
-    ];
-    
-    let timestamp = '';
-    for (const selector of timestampSelectors) {
-      const timestampElement = element.querySelector(selector);
-      if (timestampElement?.textContent) {
-        timestamp = timestampElement.textContent.trim();
-        break;
-      }
-    }
-
-    // Try different selectors for content
-    const contentSelectors = [
-      '[data-tid="message-content"]',
-      '[data-tid="content"]',
-      '.message-content',
-      '.content'
-    ];
-    
-    let content = '';
-    for (const selector of contentSelectors) {
-      const contentElement = element.querySelector(selector);
-      if (contentElement?.innerHTML) {
-        content = contentElement.innerHTML.trim();
-        break;
-      }
-    }
-
-    const message = {
-      sender,
-      timestamp,
-      content,
-      attachments: []
-    };
-
-    console.log(`Message ${index + 1} details:`, message);
-
-    // Extract attachments if any
-    const attachmentSelectors = [
-      '[data-tid="attachment"]',
-      '.attachment',
-      '[data-tid="file-attachment"]',
-      '.file-attachment'
-    ];
-
-    for (const selector of attachmentSelectors) {
-      const attachmentElements = element.querySelectorAll(selector);
-      attachmentElements.forEach(attachment => {
-        const attachmentName = attachment.querySelector('[data-tid="attachment-name"]')?.textContent?.trim() ||
-                             attachment.querySelector('.attachment-name')?.textContent?.trim();
-        const attachmentUrl = attachment.querySelector('a')?.href;
-        if (attachmentName && attachmentUrl) {
-          message.attachments.push({
-            name: attachmentName,
-            url: attachmentUrl
-          });
+    // Look for lines that end with time indicators
+    if (chatIndicators.some(indicator => line.includes(indicator)) && line.length > 5) {
+      // Try to find chat name in previous lines
+      let chatName = null;
+      for (let j = Math.max(0, i - 3); j < i; j++) {
+        const potentialName = lines[j].trim();
+        if (potentialName && 
+            potentialName.length > 3 && 
+            !chatIndicators.some(indicator => potentialName.includes(indicator))) {
+          chatName = potentialName;
+          break;
         }
+      }
+      
+      chats.push({
+        chatName: chatName,
+        lastMessage: line,
+        hasUnread: line.includes('Unread')
       });
     }
+  }
+  
+  return chats;
+}
 
-    chatData.messages.push(message);
-  });
-
-  console.log('Final chat data:', chatData);
-  return chatData;
+function any(predicate, array) {
+  return array.some(predicate);
 }
 
 // Listen for messages from the background script
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   console.log('Content script received message:', request);
   if (request.action === 'extractChat') {
-    const chatData = extractChatData();
-    console.log('Sending chat data back:', chatData);
-    sendResponse(chatData);
+    extractChatData()
+      .then(chatData => {
+        console.log('Sending chat data back:', chatData);
+        sendResponse(chatData);
+      })
+      .catch(error => {
+        console.error('Error in message listener:', error);
+        sendResponse({
+          title: 'Error Extracting Chat',
+          messages: [],
+          error: error.message
+        });
+      });
+    return true; // Keep the message channel open for async response
   }
-  return true;
 }); 
