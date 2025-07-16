@@ -97,6 +97,24 @@ function getElementPath(element) {
   return path.join(' > ');
 }
 
+// Function to normalize dates by adding current year if missing
+function normalizeDate(dateString) {
+  const currentYear = new Date().getFullYear();
+  
+  // Check if date already has a year
+  if (dateString.includes(currentYear.toString()) || dateString.includes('2024') || dateString.includes('2025')) {
+    return dateString; // Already has year
+  }
+  
+  // Check if it's a month + day format (e.g., "May 27", "December 17")
+  const monthDayPattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$/i;
+  if (monthDayPattern.test(dateString)) {
+    return `${dateString}, ${currentYear}`;
+  }
+  
+  return dateString; // Return as-is if no pattern matches
+}
+
 // Function to convert weekday names to actual dates
 function convertWeekdayToDate(weekdayName) {
   const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -121,8 +139,189 @@ function convertWeekdayToDate(weekdayName) {
   
   const month = months[targetDate.getMonth()];
   const day = targetDate.getDate();
+  const year = targetDate.getFullYear();
   
-  return `${month} ${day}`;
+  return `${month} ${day}, ${year}`;
+}
+
+// Function to extract reactions from message content
+function extractReactions(content) {
+  if (!content) {
+    return { cleanedContent: content, reactions: [] };
+  }
+  
+  const reactions = [];
+  let cleanedContent = content;
+  
+  // Pattern for reactions: "2 Heart reactions.2" or "1 Like reaction." 
+  const reactionPattern = /(\d+)\s+(Like|Heart|Laugh|Surprised?|Sad|Angry)\s+reactions?\s*(?:with [^.]*)?\.(\d*)/gi;
+  
+  let match;
+  while ((match = reactionPattern.exec(content)) !== null) {
+    const count = parseInt(match[1]);
+    const type = match[2].toLowerCase();
+    
+    // Map reaction types to emojis
+    const reactionEmojis = {
+      'like': '👍',
+      'heart': '❤️', 
+      'laugh': '😆',
+      'surprised': '😮',
+      'surprise': '😮',
+      'sad': '😢',
+      'angry': '😠'
+    };
+    
+    const emoji = reactionEmojis[type] || '👍';
+    
+    reactions.push({
+      type: type,
+      count: count,
+      emoji: emoji
+    });
+  }
+  
+  // Remove all reaction text from content
+  cleanedContent = cleanedContent.replace(/\d+\s+(Like|Heart|Laugh|Surprised?|Sad|Angry)\s+reactions?\s*(?:with [^.]*)?\.(\d*)/gi, '').trim();
+  
+  // Clean up any trailing periods or numbers
+  cleanedContent = cleanedContent.replace(/\.\d*$/, '').trim();
+  
+  return { cleanedContent, reactions };
+}
+
+// Function to extract media (GIFs, images) from DOM element
+function extractMediaFromElement(element) {
+  const media = [];
+  const seenSources = new Set(); // Track seen sources to avoid duplicates
+  
+  // Look for GIF elements
+  const gifElements = element.querySelectorAll('[aria-label*="GIF"], img[src*="giphy"], img[src*="tenor"]');
+  gifElements.forEach(gifEl => {
+    const ariaLabel = gifEl.getAttribute('aria-label') || gifEl.parentElement?.getAttribute('aria-label') || '';
+    let src = '';
+    
+    // Find the actual image source
+    if (gifEl.tagName === 'IMG') {
+      src = gifEl.src;
+    } else {
+      const img = gifEl.querySelector('img');
+      if (img) src = img.src;
+    }
+    
+    // Filter out Teams internal emoticons and duplicates
+    if (src && 
+        (src.includes('giphy') || src.includes('tenor') || ariaLabel.includes('GIF')) &&
+        !src.includes('statics.teams.cdn.office.net') &&
+        !src.includes('emoticons') &&
+        !seenSources.has(src)) {
+      
+      seenSources.add(src);
+      media.push({
+        type: 'gif',
+        src: src,
+        alt: ariaLabel || 'GIF',
+        title: ariaLabel || 'GIF'
+      });
+    }
+  });
+  
+  // Look for other images that might be media
+  const images = element.querySelectorAll('img:not([src*="giphy"]):not([src*="tenor"])');
+  images.forEach(img => {
+    if (img.src && 
+        !img.src.includes('emoticons') && 
+        !img.src.includes('avatar') &&
+        !img.src.includes('statics.teams.cdn.office.net') &&
+        !seenSources.has(img.src)) {
+      
+      const alt = img.alt || img.title || '';
+      if (alt && !alt.includes('reaction') && !alt.includes('emoji')) {
+        seenSources.add(img.src);
+        media.push({
+          type: 'image',
+          src: img.src,
+          alt: alt,
+          title: alt
+        });
+      }
+    }
+  });
+  
+  return media;
+}
+
+// Function to extract reactions from DOM structure
+function extractReactionsFromDOM(element) {
+  const reactions = [];
+  
+  // Look for reaction elements in Teams DOM structure
+  const reactionElements = element.querySelectorAll('[id*="message-"][id*="-reaction"], [aria-labelledby*="message-"][aria-labelledby*="-reaction"]');
+  reactionElements.forEach(reactionEl => {
+    const textContent = reactionEl.textContent?.trim() || '';
+    const match = textContent.match(/(\d+)\s+(Like|Heart|Laugh|Surprised?|Sad|Angry)\s+reactions?/i);
+    
+    if (match) {
+      const count = parseInt(match[1]);
+      const type = match[2].toLowerCase();
+      
+      const reactionEmojis = {
+        'like': '👍',
+        'heart': '❤️', 
+        'laugh': '😆',
+        'surprised': '😮',
+        'surprise': '😮',
+        'sad': '😢',
+        'angry': '😠'
+      };
+      
+      const emoji = reactionEmojis[type] || '👍';
+      
+      reactions.push({
+        type: type,
+        count: count,
+        emoji: emoji
+      });
+    }
+  });
+  
+  // Also look for reaction summary areas
+  const reactionSummary = element.querySelector('[data-tid="diverse-reaction-summary"]');
+  if (reactionSummary) {
+    const reactionButtons = reactionSummary.querySelectorAll('[data-tid="diverse-reaction-pill-button"]');
+    reactionButtons.forEach(button => {
+      const reactionText = button.textContent?.trim() || '';
+      const match = reactionText.match(/(\d+)\s+(Like|Heart|Laugh|Surprised?|Sad|Angry)\s+reactions?/i);
+      
+      if (match) {
+        const count = parseInt(match[1]);
+        const type = match[2].toLowerCase();
+        
+        const reactionEmojis = {
+          'like': '👍',
+          'heart': '❤️', 
+          'laugh': '😆',
+          'surprised': '😮',
+          'surprise': '😮',
+          'sad': '😢',
+          'angry': '😠'
+        };
+        
+        const emoji = reactionEmojis[type] || '👍';
+        
+        // Avoid duplicates
+        if (!reactions.find(r => r.type === type)) {
+          reactions.push({
+            type: type,
+            count: count,
+            emoji: emoji
+          });
+        }
+      }
+    });
+  }
+  
+  return reactions;
 }
 
 // Function to extract chat data from the current page
@@ -284,11 +483,11 @@ function extractMessagesFromDOM(container) {
       if (message && message.content && message.content.length > 5) {
         
         // Check if this message is a date marker
-        const datePattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$|^\d{1,2}\/\d{1,2}\/\d{4}$|^(Today|Yesterday)$|^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}$/i;
+        const datePattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,?\s+\d{4})?$|^\d{1,2}\/\d{1,2}\/\d{4}$|^(Today|Yesterday)$|^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}$/i;
         const weekdayPattern = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$/i;
         
         if (datePattern.test(message.content.trim())) {
-          currentDate = message.content.trim();
+          currentDate = normalizeDate(message.content.trim());
           // Don't add date markers as regular messages
           return;
         } else if (weekdayPattern.test(message.content.trim())) {
@@ -317,6 +516,76 @@ function extractMessagesFromDOM(container) {
 function extractMessageFromElement(element) {
   const fullText = element.textContent?.trim() || '';
   
+  // Extract GIFs and media from DOM
+  const media = extractMediaFromElement(element);
+  
+  // Extract reactions from DOM structure
+  const domReactions = extractReactionsFromDOM(element);
+  
+  // Check for quote/reference blocks first
+  if (fullText.includes('Reference,')) {
+    const lines = fullText.split('\n');
+    let referenceTopic = '';
+    let messageDate = '';
+    let quotedInfo = '';
+    let remainingContent = '';
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      if (line.startsWith('Reference,')) {
+        referenceTopic = line.substring(10).trim(); // Remove "Reference, "
+      } else if (line.match(/^[A-Za-z]+\s+\d{1,2},?\s+\d{1,2}:\d{2}\s*(?:AM|PM)$/)) {
+        messageDate = line;
+      } else if (line.includes('[NH]') && line.includes('/')) {
+        // This line contains the quoted sender, date, and content
+        quotedInfo = line;
+      } else if (line.length > 0 && !line.match(/^\d+\s*Like reaction/)) {
+        // This is the new message content
+        remainingContent += (remainingContent ? '\n' : '') + line;
+      }
+    }
+    
+    if (quotedInfo) {
+      // Parse the quoted info line: "Sender7/7/2025, 3:46 PMQuoted content"
+      const quotedPattern = /([A-Za-z]+,\s*[A-Za-z]+\s*\[[^\]]+\])(\d{1,2}\/\d{1,2}\/\d{4}),?\s*(\d{1,2}:\d{2}\s*(?:AM|PM))(.+)/;
+      const quotedMatch = quotedInfo.match(quotedPattern);
+      
+      if (quotedMatch) {
+        const quotedSender = quotedMatch[1];
+        const quotedDate = quotedMatch[2];
+        const quotedTime = quotedMatch[3];
+        const quotedContent = quotedMatch[4];
+        
+        // Clean up content - remove like reactions
+        remainingContent = remainingContent.replace(/\d+\s*Like reaction\.?/g, '').trim();
+        
+        // Format the content with quote block
+        const formattedContent = `> **Quoted from ${quotedSender} (${quotedDate}, ${quotedTime}):**
+> ${quotedContent.trim()}
+
+${remainingContent}`;
+        
+        // The actual sender is the person making the reply, not the quoted person
+        // Since we can't easily determine this from the quote block alone, mark as Reply
+        const { cleanedContent, reactions } = extractReactions(remainingContent);
+        const finalContent = `> **Quoted from ${quotedSender} (${quotedDate}, ${quotedTime}):**
+> ${quotedContent.trim()}
+
+${cleanedContent}`;
+        
+        return {
+          sender: 'Reply (quoting ' + quotedSender + ')',
+          content: finalContent,
+          reactions: domReactions.length > 0 ? domReactions : reactions,
+          media: media,
+          timestamp: messageDate,
+          type: 'message'
+        };
+      }
+    }
+  }
+  
   // Updated Teams format: "Preview... by Sender NameSender Name (repeated)TimestampFull Message"
   // More flexible pattern to handle the actual Teams format
   const messagePattern = /^(.+?)\s+by\s+([A-Za-z]+,\s*[A-Za-z]+\s*(?:\[[^\]]+\])?)\s*\1?\s*(\d{1,2}:\d{2}\s*(?:AM|PM))\s*(.+)$/;
@@ -329,9 +598,12 @@ function extractMessageFromElement(element) {
     const timestamp = match[3];
     const fullMessage = match[4];
     
+    const { cleanedContent, reactions } = extractReactions(fullMessage || preview);
     return {
       sender: sender,
-      content: fullMessage || preview,
+      content: cleanedContent,
+      reactions: domReactions.length > 0 ? domReactions : reactions,
+      media: media,
       timestamp: timestamp,
       type: 'message'
     };
@@ -347,9 +619,12 @@ function extractMessageFromElement(element) {
     const timestamp = match[4];
     const fullMessage = match[5];
     
+    const { cleanedContent, reactions } = extractReactions(fullMessage || preview);
     return {
       sender: sender,
-      content: fullMessage || preview,
+      content: cleanedContent,
+      reactions: domReactions.length > 0 ? domReactions : reactions,
+      media: media,
       timestamp: timestamp,
       type: 'message'
     };
@@ -392,14 +667,19 @@ function extractMessageFromElement(element) {
     }
   }
   
-  // Clean up content - remove any remaining sender references
+  // Clean up content - remove any remaining sender references and like reactions
   if (sender && content.includes(sender)) {
     content = content.replace(new RegExp(sender.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '').trim();
   }
   
+  // Extract and format reactions
+  const { cleanedContent, reactions } = extractReactions(content);
+  
   return {
     sender: sender || 'Unknown sender',
-    content: content || 'No content',
+    content: cleanedContent || 'No content',
+    reactions: domReactions.length > 0 ? domReactions : reactions,
+    media: media,
     timestamp: timestamp || 'Unknown time',
     type: 'message'
   };
@@ -417,7 +697,7 @@ function extractMessagesFromText(text) {
   // Improved patterns for Teams message extraction
   const senderNamePattern = /^([A-Za-z]+,\s*[A-Za-z]+\s*(?:\[[^\]]+\])?)/; // "Lastname, Firstname [NH]"
   const timePattern = /(\d{1,2}:\d{2}\s*(?:AM|PM))/i;
-  const datePattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}$|^\d{1,2}\/\d{1,2}\/\d{4}$|^(Today|Yesterday)$/i;
+  const datePattern = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,?\s+\d{4})?$|^\d{1,2}\/\d{1,2}\/\d{4}$|^(Today|Yesterday)$/i;
   
   let currentMessage = '';
   let currentSender = '';
@@ -445,7 +725,7 @@ function extractMessagesFromText(text) {
       const weekdayMatch = line.match(weekdayPattern);
       
       if (dateMatch) {
-        currentDate = line;
+        currentDate = normalizeDate(line);
         continue;
       } else if (weekdayMatch) {
         currentDate = convertWeekdayToDate(line);
@@ -467,9 +747,12 @@ function extractMessagesFromText(text) {
             timestamp = `${currentDate}, ${timestamp}`;
           }
           
+          const { cleanedContent, reactions } = extractReactions(currentMessage.trim());
           messages.push({
-            content: currentMessage.trim(),
+            content: cleanedContent,
             sender: currentSender,
+            reactions: reactions,
+            media: [], // Text extraction doesn't have access to DOM media
             timestamp: timestamp,
             type: 'message'
           });
@@ -517,9 +800,12 @@ function extractMessagesFromText(text) {
         timestamp = `${currentDate}, ${timestamp}`;
       }
       
+      const { cleanedContent, reactions } = extractReactions(currentMessage.trim());
       messages.push({
-        content: currentMessage.trim(),
+        content: cleanedContent,
         sender: currentSender,
+        reactions: reactions,
+        media: [], // Text extraction doesn't have access to DOM media
         timestamp: timestamp,
         type: 'message'
       });

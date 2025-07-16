@@ -247,6 +247,65 @@ function generateChatHTML(chatData, sectionIndex = null, sectionMessages = null)
         .navigation a:hover {
           text-decoration: underline;
         }
+        .quote-block {
+          border-left: 4px solid #464775;
+          margin: 10px 0;
+          padding-left: 15px;
+          background-color: #f8f9fa;
+          color: #666;
+          font-style: italic;
+        }
+        .quote-block strong {
+          color: #464775;
+          font-style: normal;
+        }
+        .reactions {
+          margin-top: 8px;
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .reaction {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 4px 8px;
+          background-color: #f0f0f0;
+          border-radius: 12px;
+          font-size: 0.85em;
+          color: #666;
+          border: 1px solid #e0e0e0;
+        }
+        .reaction-emoji {
+          font-size: 1.1em;
+        }
+        .media {
+          margin: 10px 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .media-item {
+          max-width: 300px;
+          border-radius: 8px;
+          overflow: hidden;
+          border: 1px solid #e0e0e0;
+        }
+        .media-item img {
+          width: 100%;
+          height: auto;
+          display: block;
+        }
+        .media-item.gif {
+          border: 2px solid #464775;
+        }
+        .media-caption {
+          padding: 8px;
+          background-color: #f8f9fa;
+          font-size: 0.85em;
+          color: #666;
+          border-top: 1px solid #e0e0e0;
+        }
       </style>
     </head>
     <body>
@@ -267,7 +326,9 @@ function generateChatHTML(chatData, sectionIndex = null, sectionMessages = null)
           <span class="sender">${message.sender || 'Unknown'}</span>
           <span class="timestamp">${message.timestamp || 'Unknown time'}</span>
         </div>
-        <div class="message-content">${message.content || ''}</div>
+        <div class="message-content">${formatMessageContent(message.content || '')}</div>
+        ${(message.media && message.media.length > 0) ? generateMediaHTML(message.media) : ''}
+        ${(message.reactions && message.reactions.length > 0) ? generateReactionsHTML(message.reactions) : ''}
         ${(message.attachments && message.attachments.length > 0) ? generateAttachmentsHTML(message.attachments) : ''}
       </div>
     `;
@@ -329,6 +390,87 @@ function generateIndexHTML(chatData, sectionCount) {
   `;
 
   return html;
+}
+
+function formatMessageContent(content) {
+  if (!content) return '';
+  
+  // Handle quote blocks (lines starting with >)
+  const lines = content.split('\n');
+  let inQuote = false;
+  let result = [];
+  let currentQuote = [];
+  
+  for (const line of lines) {
+    if (line.startsWith('> ')) {
+      if (!inQuote) {
+        inQuote = true;
+        if (result.length > 0) {
+          // Add any previous non-quote content
+          result.push(result.pop() || '');
+        }
+      }
+      currentQuote.push(line.substring(2)); // Remove "> " prefix
+    } else if (line.startsWith('>')) {
+      if (!inQuote) {
+        inQuote = true;
+      }
+      currentQuote.push(line.substring(1)); // Remove ">" prefix
+    } else {
+      if (inQuote) {
+        // End of quote block
+        result.push(`<div class="quote-block">${currentQuote.join('<br>')}</div>`);
+        currentQuote = [];
+        inQuote = false;
+      }
+      if (line.trim()) {
+        result.push(line);
+      }
+    }
+  }
+  
+  // Handle any remaining quote at the end
+  if (inQuote && currentQuote.length > 0) {
+    result.push(`<div class="quote-block">${currentQuote.join('<br>')}</div>`);
+  }
+  
+  return result.join('<br>');
+}
+
+function generateMediaHTML(media) {
+  if (!media || !Array.isArray(media) || media.length === 0) return '';
+  
+  const mediaHtml = media.map(item => {
+    if (!item || !item.src) return '';
+    
+    const isGif = item.type === 'gif' || item.src.includes('giphy') || item.src.includes('tenor');
+    const cssClass = isGif ? 'media-item gif' : 'media-item';
+    
+    return `
+      <div class="${cssClass}">
+        <img src="${item.src}" alt="${item.alt || ''}" title="${item.title || ''}">
+        ${item.alt && item.alt !== 'GIF' ? `<div class="media-caption">${item.alt}</div>` : ''}
+      </div>
+    `;
+  }).join('');
+  
+  return `<div class="media">${mediaHtml}</div>`;
+}
+
+function generateReactionsHTML(reactions) {
+  if (!reactions || !Array.isArray(reactions) || reactions.length === 0) return '';
+  
+  const reactionsHtml = reactions.map(reaction => {
+    if (!reaction || !reaction.emoji || !reaction.count) return '';
+    return `
+      <div class="reaction">
+        <span class="reaction-emoji">${reaction.emoji}</span>
+        <span class="reaction-count">${reaction.count}</span>
+      </div>
+    `;
+  }).join('');
+  
+  return `<div class="reactions">${reactionsHtml}</div>`;
 }
 
 function generateAttachmentsHTML(attachments) {
