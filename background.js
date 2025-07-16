@@ -57,26 +57,35 @@ async function startExport() {
       return;
     }
 
-    // Split messages into sections of 100 messages each
-    const MESSAGES_PER_SECTION = 100;
-    const sections = [];
-    for (let i = 0; i < (chatData.messages?.length || 0); i += MESSAGES_PER_SECTION) {
-      sections.push(chatData.messages.slice(i, i + MESSAGES_PER_SECTION));
+    const messageCount = chatData.messages?.length || 0;
+    
+    // For small chats (≤50 messages), create single file. For larger chats, use sections.
+    if (messageCount <= 50) {
+      console.log(`Creating single file for ${messageCount} messages...`);
+      const chatHtml = generateChatHTML(chatData);
+      await saveChatToFile(chatHtml, chatData.title || 'untitled_chat');
+    } else {
+      // Split messages into sections of 100 messages each for larger chats
+      const MESSAGES_PER_SECTION = 100;
+      const sections = [];
+      for (let i = 0; i < messageCount; i += MESSAGES_PER_SECTION) {
+        sections.push(chatData.messages.slice(i, i + MESSAGES_PER_SECTION));
+      }
+
+      console.log(`Splitting chat into ${sections.length} sections...`);
+
+      // Generate and save section files
+      for (let i = 0; i < sections.length; i++) {
+        console.log(`Generating HTML for section ${i + 1}...`);
+        const sectionHtml = generateChatHTML(chatData, i, sections[i]);
+        await saveChatToFile(sectionHtml, chatData.title || 'untitled_chat', i);
+      }
+
+      // Generate and save index file
+      console.log('Generating index file...');
+      const indexHtml = generateIndexHTML(chatData, sections.length);
+      await saveChatToFile(indexHtml, `${chatData.title || 'untitled_chat'}_index`);
     }
-
-    console.log(`Splitting chat into ${sections.length} sections...`);
-
-    // Generate and save section files
-    for (let i = 0; i < sections.length; i++) {
-      console.log(`Generating HTML for section ${i + 1}...`);
-      const sectionHtml = generateChatHTML(chatData, i, sections[i]);
-      await saveChatToFile(sectionHtml, chatData.title || 'untitled_chat', i);
-    }
-
-    // Generate and save index file
-    console.log('Generating index file...');
-    const indexHtml = generateIndexHTML(chatData, sections.length);
-    await saveChatToFile(indexHtml, `${chatData.title || 'untitled_chat'}_index`);
 
     chrome.runtime.sendMessage({
       type: 'complete',
