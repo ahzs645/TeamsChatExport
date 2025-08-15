@@ -23,17 +23,19 @@
   const MESSAGE_BODY_SELECTOR = '.fui-ChatMessage__body, .fui-ChatMyMessage__body';
 
   // Additional selectors to try for chat list items
-  // Prioritize Windows selectors first since they're more common
+  // Try both Windows and Mac selectors
   const ALTERNATIVE_CHAT_SELECTORS = [
-    '.fui-TreeItem',           // Windows Teams v2 (31 found)
-    '[role="treeitem"]',       // Windows Teams v2 (31 found) 
-    '[data-tid="chat-list-item"]',  // Mac Teams
+    '[data-tid="chat-list-item"]',  // Mac Teams (original working)
+    '.fui-TreeItem',               // Windows Teams v2
+    '[role="treeitem"]',           // Windows Teams v2 alternative
     '[data-testid="chat-list-item"]', 
     '.ms-List-cell',
     '[data-automationid*="chat"]',
     '[data-tid*="chat-item"]',
     '.chat-item',
-    '.conversation-item'
+    '.conversation-item',
+    '[role="listitem"]',           // Generic fallback
+    '.ms-FocusZone [role="button"]' // Another fallback
   ];
 
   /**
@@ -45,25 +47,29 @@
       .conversation-checkbox {
         width: 20px;
         height: 20px;
-        margin-right: 15px;
+        margin-right: 10px;
         cursor: pointer;
         vertical-align: middle;
         accent-color: #5B5FC5;
         flex-shrink: 0;
       }
-      /* Mac Teams support */
-      [data-tid="chat-list-item"] {
-        display: flex !important;
-        align-items: center !important;
+      
+      /* Ensure parent containers can accommodate checkboxes */
+      [data-tid="chat-list-item"],
+      .fui-TreeItem, 
+      [role="treeitem"] {
+        display: flex;
+        align-items: center;
       }
-      /* Windows Teams support */
-      .fui-TreeItem, [role="treeitem"] {
-        display: flex !important;
-        align-items: center !important;
+      
+      /* Specific adjustments for different platforms */
+      [data-tid="chat-list-item"] .conversation-checkbox {
+        margin-right: 15px;
       }
+      
       .fui-TreeItem .conversation-checkbox,
       [role="treeitem"] .conversation-checkbox {
-        margin: 0 8px 0 0;
+        margin-right: 8px;
         position: relative;
         z-index: 10;
       }
@@ -257,20 +263,20 @@
    */
   const getCurrentChatTitle = () => {
     const titleSelectors = [
-      // Windows Teams v2 selectors (try these first)
-      '.fui-ThreadHeader__title',
-      '[role="main"] h1',
-      '.ms-Stack-inner h1', 
-      'h1',
-      // Mac Teams selectors
+      // Mac Teams selectors (original working ones first)
       '[data-tid="chat-header-title"]',
       '[data-tid="thread-header-title"]',
       '[data-tid="threadHeaderTitle"]',
+      '[data-tid="chat-title"]',
+      // Windows Teams v2 selectors
+      '.fui-ThreadHeader__title',
+      '[role="main"] h1',
+      '.ms-Stack-inner h1',
+      // Generic selectors (be more specific to avoid false matches)
       '.chat-header h1',
       '.ts-calling-thread-header',
       '[aria-label*="Chat with"]',
       'h1[data-tid*="title"]',
-      '[data-tid="chat-title"]',
       '.thread-header-title',
       '[data-testid*="chat-title"]',
       '[data-testid*="thread-title"]'
