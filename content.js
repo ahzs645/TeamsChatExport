@@ -23,11 +23,12 @@
   const MESSAGE_BODY_SELECTOR = '.fui-ChatMessage__body, .fui-ChatMyMessage__body';
 
   // Additional selectors to try for chat list items
+  // Prioritize Windows selectors first since they're more common
   const ALTERNATIVE_CHAT_SELECTORS = [
-    '[data-tid="chat-list-item"]',
+    '.fui-TreeItem',           // Windows Teams v2 (31 found)
+    '[role="treeitem"]',       // Windows Teams v2 (31 found) 
+    '[data-tid="chat-list-item"]',  // Mac Teams
     '[data-testid="chat-list-item"]', 
-    '.fui-TreeItem',
-    '[role="treeitem"]',
     '.ms-List-cell',
     '[data-automationid*="chat"]',
     '[data-tid*="chat-item"]',
@@ -48,10 +49,23 @@
         cursor: pointer;
         vertical-align: middle;
         accent-color: #5B5FC5;
+        flex-shrink: 0;
       }
+      /* Mac Teams support */
       [data-tid="chat-list-item"] {
         display: flex !important;
         align-items: center !important;
+      }
+      /* Windows Teams support */
+      .fui-TreeItem, [role="treeitem"] {
+        display: flex !important;
+        align-items: center !important;
+      }
+      .fui-TreeItem .conversation-checkbox,
+      [role="treeitem"] .conversation-checkbox {
+        margin: 0 8px 0 0;
+        position: relative;
+        z-index: 10;
       }
     `;
     document.head.appendChild(style);
@@ -243,6 +257,12 @@
    */
   const getCurrentChatTitle = () => {
     const titleSelectors = [
+      // Windows Teams v2 selectors (try these first)
+      '.fui-ThreadHeader__title',
+      '[role="main"] h1',
+      '.ms-Stack-inner h1', 
+      'h1',
+      // Mac Teams selectors
       '[data-tid="chat-header-title"]',
       '[data-tid="thread-header-title"]',
       '[data-tid="threadHeaderTitle"]',
@@ -251,9 +271,6 @@
       '[aria-label*="Chat with"]',
       'h1[data-tid*="title"]',
       '[data-tid="chat-title"]',
-      '.fui-ThreadHeader__title',
-      '.ms-Stack-inner h1',
-      '[role="main"] h1',
       '.thread-header-title',
       '[data-testid*="chat-title"]',
       '[data-testid*="thread-title"]'
