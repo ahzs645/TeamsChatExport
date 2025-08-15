@@ -135,6 +135,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const messageBubble = document.createElement('div');
       messageBubble.classList.add('message-bubble');
+      
+      // Add special styling for Ahmad's messages (sent messages)
+      if (msg.type === 'sent' || (msg.author && msg.author.toLowerCase().includes('ahmad'))) {
+        messageBubble.classList.add('sent-message');
+        messageBubble.style.backgroundColor = '#8B5FBF';
+        messageBubble.style.color = 'white';
+        messageBubble.style.marginLeft = 'auto';
+        messageBubble.style.marginRight = '0';
+        messageContainer.style.textAlign = 'right';
+      }
 
       const messageText = document.createElement('div');
       messageText.textContent = msg.message;
