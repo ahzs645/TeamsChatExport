@@ -40,7 +40,7 @@ body {
     display: none;
 }
 
-#download-json-button {
+#download-json-button, #download-html-button {
     background-color: #5B5FC5;
     color: white;
     padding: 7px 10px;
@@ -48,25 +48,10 @@ body {
     cursor: pointer;
     font-size: 14px;
     border: none;
-    margin-left: 10px; /* Space between upload and download */
+    margin-left: 10px; /* Space between buttons */
 }
 
-#download-json-button:hover {
-    background-color: #4a4d9e;
-}
-
-#download-json-button {
-    background-color: #5B5FC5;
-    color: white;
-    padding: 7px 10px;
-    border-radius: 5px;
-    cursor: pointer;
-    font-size: 14px;
-    border: none;
-    margin-left: 10px; /* Space between upload and download */
-}
-
-#download-json-button:hover {
+#download-json-button:hover, #download-html-button:hover {
     background-color: #4a4d9e;
 }
 

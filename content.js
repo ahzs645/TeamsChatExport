@@ -128,6 +128,143 @@
   const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   /**
+   * Converts relative timestamps to actual dates
+   */
+  const convertRelativeTimestamp = (timestamp) => {
+    if (!timestamp || timestamp.trim() === '') return timestamp;
+    
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+    
+    let cleanTimestamp = timestamp.trim();
+    
+    // Handle "Today" timestamps
+    if (cleanTimestamp.toLowerCase().startsWith('today')) {
+      const timeMatch = cleanTimestamp.match(/(\d{1,2}:\d{2}(?:\s*[ap]m)?)/i);
+      if (timeMatch) {
+        const timeStr = timeMatch[1];
+        const dateStr = today.toLocaleDateString('en-US', { 
+          year: 'numeric', 
+          month: 'long', 
+          day: 'numeric' 
+        });
+        return `${dateStr} ${timeStr}`;
+      }
+      return today.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    }
+    
+    // Handle "Yesterday" timestamps
+    if (cleanTimestamp.toLowerCase().startsWith('yesterday')) {
+      const timeMatch = cleanTimestamp.match(/(\d{1,2}:\d{2}(?:\s*[ap]m)?)/i);
+      if (timeMatch) {
+        const timeStr = timeMatch[1];
+        const dateStr = yesterday.toLocaleDateString('en-US', { 
+          year: 'numeric', 
+          month: 'long', 
+          day: 'numeric' 
+        });
+        return `${dateStr} ${timeStr}`;
+      }
+      return yesterday.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      });
+    }
+    
+    // Handle day names (Monday, Tuesday, etc.)
+    const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const lowerTimestamp = cleanTimestamp.toLowerCase();
+    
+    for (let i = 0; i < dayNames.length; i++) {
+      if (lowerTimestamp.startsWith(dayNames[i])) {
+        const timeMatch = cleanTimestamp.match(/(\d{1,2}:\d{2}(?:\s*[ap]m)?)/i);
+        const dayOfWeek = i; // 0 = Sunday, 1 = Monday, etc.
+        
+        // Find the most recent occurrence of this day
+        const currentDayOfWeek = now.getDay();
+        let daysAgo = (currentDayOfWeek - dayOfWeek + 7) % 7;
+        if (daysAgo === 0) daysAgo = 7; // If it's the same day, assume it was last week
+        
+        const targetDate = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+        const dateStr = targetDate.toLocaleDateString('en-US', { 
+          year: 'numeric', 
+          month: '2-digit', 
+          day: '2-digit' 
+        });
+        
+        if (timeMatch) {
+          const timeStr = timeMatch[1];
+          return `${dateStr} ${timeStr}`;
+        }
+        return dateStr;
+      }
+    }
+    
+    // Handle "X days ago" format
+    const daysAgoMatch = cleanTimestamp.match(/(\d+)\s*days?\s*ago/i);
+    if (daysAgoMatch) {
+      const daysAgo = parseInt(daysAgoMatch[1]);
+      const targetDate = new Date(now.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+      const timeMatch = cleanTimestamp.match(/(\d{1,2}:\d{2}(?:\s*[ap]m)?)/i);
+      
+      const dateStr = targetDate.toLocaleDateString('en-US', { 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit' 
+      });
+      
+      if (timeMatch) {
+        const timeStr = timeMatch[1];
+        return `${dateStr} ${timeStr}`;
+      }
+      return dateStr;
+    }
+    
+    // Handle "X hours ago" format
+    const hoursAgoMatch = cleanTimestamp.match(/(\d+)\s*hours?\s*ago/i);
+    if (hoursAgoMatch) {
+      const hoursAgo = parseInt(hoursAgoMatch[1]);
+      const targetDate = new Date(now.getTime() - hoursAgo * 60 * 60 * 1000);
+      return targetDate.toLocaleString('en-US', { 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+    
+    // Handle "X minutes ago" format
+    const minutesAgoMatch = cleanTimestamp.match(/(\d+)\s*min(?:utes?)?\s*ago/i);
+    if (minutesAgoMatch) {
+      const minutesAgo = parseInt(minutesAgoMatch[1]);
+      const targetDate = new Date(now.getTime() - minutesAgo * 60 * 1000);
+      return targetDate.toLocaleString('en-US', { 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    }
+    
+    // Handle formats like "12/25/2023" or "Dec 25" with optional time
+    if (cleanTimestamp.match(/\d{1,2}\/\d{1,2}\/?\d{0,4}|\w{3}\s+\d{1,2}/)) {
+      // Already has proper date format, just return it
+      return timestamp;
+    }
+    
+    // If no conversion needed, return original
+    return timestamp;
+  };
+
+  /**
    * Extracts detailed information for all visible messages in the chat pane.
    */
   const extractVisibleMessages = () => {
@@ -138,8 +275,11 @@
     const messageSelectors = [
       '[data-tid="chat-pane-item"]',      // Classic/current
       '.fui-unstable-ChatItem',          // New Teams
-      '.fui-ChatMessage',                // Alternative
-      '[data-tid="message"]'             // Generic
+      '.fui-ChatMessage',                // Fluent UI received messages
+      '.fui-ChatMyMessage',              // Fluent UI sent messages
+      '[data-tid="message"]',            // Generic
+      '[role="article"]',                // ARIA role for messages
+      '.message-container'               // Generic message container
     ];
     
     let messageContainers = [];
@@ -222,13 +362,21 @@
       let type = 'received';
       
       // Check multiple indicators for sent messages
+      // Primary indicators for Fluent UI
       if (container.querySelector('.fui-ChatMyMessage__timestamp') ||
           container.querySelector('.fui-ChatMyMessage__body') ||
-          container.classList.contains('sent') ||
+          container.classList.contains('fui-ChatMyMessage')) {
+        type = 'sent';
+      }
+      
+      // Secondary indicators - data attributes and classes
+      if (container.classList.contains('sent') ||
           container.getAttribute('data-type') === 'sent' ||
           container.querySelector('[data-tid*="my-message"]') ||
           container.closest('[data-tid*="my-message"]') ||
-          (author && author.toLowerCase().includes('ahmad'))) {
+          container.getAttribute('data-is-from-me') === 'true' ||
+          container.classList.contains('me') ||
+          container.classList.contains('self')) {
         type = 'sent';
       }
       
@@ -236,19 +384,34 @@
       const computedStyle = window.getComputedStyle(container);
       if (computedStyle.textAlign === 'right' || 
           computedStyle.justifyContent === 'flex-end' ||
+          computedStyle.alignSelf === 'flex-end' ||
+          computedStyle.marginLeft === 'auto' ||
           container.style.marginLeft === 'auto') {
         type = 'sent';
+      }
+      
+      // Check parent container for sent message indicators
+      const parentContainer = container.parentElement;
+      if (parentContainer) {
+        if (parentContainer.classList.contains('sent') ||
+            parentContainer.classList.contains('me') ||
+            parentContainer.getAttribute('data-from-me') === 'true') {
+          type = 'sent';
+        }
       }
 
       // Only include messages with at least author and message content
       if (message && message.length > 0) {
         // Use fallback values if author/timestamp missing
         const finalAuthor = author || 'Unknown User';
-        const finalTimestamp = timestamp || new Date().toLocaleString();
+        const rawTimestamp = timestamp || new Date().toLocaleString();
+        const convertedTimestamp = convertRelativeTimestamp(rawTimestamp);
+        
+        console.log(`🕐 Timestamp conversion: "${rawTimestamp}" → "${convertedTimestamp}"`);
         
         extractedMessages.push({ 
           author: finalAuthor, 
-          timestamp: finalTimestamp, 
+          timestamp: convertedTimestamp, 
           message: message, 
           type: type 
         });
@@ -280,7 +443,11 @@
       }
     }
 
-    chrome.runtime.sendMessage({action: 'updateSelectionState', allSelected: allSelected, selectedCount: selectedCount});
+    try {
+      chrome.runtime.sendMessage({action: 'updateSelectionState', allSelected: allSelected, selectedCount: selectedCount});
+    } catch (error) {
+      console.warn("Extension context invalidated, could not send selection state update.");
+    }
   };
 
   /**
@@ -423,7 +590,12 @@
     console.log("\n\n✅ --- EXTRACTION COMPLETE --- ✅");
     console.log(`📊 Total conversations extracted: ${Object.keys(allConversations).length}`);
     
-    chrome.runtime.sendMessage({action: "download", data: allConversations});
+    try {
+      chrome.runtime.sendMessage({action: "download", data: allConversations});
+    } catch (error) {
+      console.error("Extension context invalidated. Please refresh the page and try again.", error);
+      alert("Extension context was invalidated. Please refresh the page and try again.");
+    }
   };
 
   /**
@@ -599,40 +771,48 @@
    * Gets the current chat title from the Teams interface
    */
   const getCurrentChatTitle = () => {
-    const teamsConfig = getTeamsVariantSelectors();
+    console.log('🔍 Detecting current chat...');
     
-    // Enhanced selectors for different Teams variants
-    const enhancedSelectors = [
-      // Fluent UI specific selectors for active/selected chat
-      'span[id^="title-chat-list-item_"]',  // Fluent UI conversation titles in sidebar
+    // Method 1: Try to find the currently selected/active chat item in the sidebar
+    const activeChatSelectors = [
+      // Fluent UI active chat items
+      '.fui-TreeItem[aria-selected="true"]',
+      '.fui-TreeItem[data-is-selected="true"]', 
+      '.fui-TreeItem.is-selected',
       
-      // New Teams specific selectors for chat header
-      '[data-tid="thread-header-title"]',
-      '.fui-ThreadHeader__title',
-      'h1[role="heading"]',
-      '[data-tid="chat-header-title"]',
-      
-      // Classic Teams selectors  
-      '.ts-calling-thread-header',
-      '.thread-header-title',
-      
-      // Generic header selectors
-      'main h1',
-      '[role="main"] h1',
-      '.chat-header h1',
-      '[aria-label*="Chat with"]',
-      'h1[data-tid*="title"]',
-      '[data-testid*="chat-title"]',
-      '[data-testid*="thread-title"]',
-      
-      // Fallback selectors
-      'header h1',
-      '.header-title',
-      '[title]:not([title*=":"]):not([title*="AM"]):not([title*="PM"])'
+      // Classic Teams active items
+      '[data-tid="chat-list-item"][aria-selected="true"]',
+      '[data-tid="chat-list-item"].active',
+      '.chat-list-item.active'
     ];
     
-    // First try enhanced selectors
-    for (const selector of enhancedSelectors) {
+    for (const selector of activeChatSelectors) {
+      const activeItem = document.querySelector(selector);
+      if (activeItem) {
+        const chatName = getConversationName(activeItem);
+        if (chatName && chatName !== 'Unknown Conversation') {
+          console.log(`📋 Found current chat from active item: "${chatName}" (selector: ${selector})`);
+          return chatName;
+        }
+      }
+    }
+    
+    // Method 2: Try to find the main chat header title (what's currently open)
+    const headerSelectors = [
+      // Main chat header selectors for the current conversation
+      '[data-tid="thread-header-title"] span',
+      '[data-tid="thread-header-title"]',
+      '.fui-ThreadHeader__title',
+      'main [role="heading"]',
+      '[data-tid="chat-header-title"]',
+      
+      // Additional header locations
+      'main h1',
+      '[role="main"] h1',
+      '.chat-header h1'
+    ];
+    
+    for (const selector of headerSelectors) {
       const element = document.querySelector(selector);
       if (element && element.textContent.trim()) {
         let title = element.textContent.trim();
@@ -641,33 +821,49 @@
         title = cleanConversationName(title);
         
         if (title && title.length > 0 && title !== 'Unknown Conversation') {
-          console.log(`📋 Found current chat: "${title}" using selector: ${selector}`);
+          console.log(`📋 Found current chat from header: "${title}" (selector: ${selector})`);
           return title;
         }
       }
     }
     
-    // Try to get from currently selected/highlighted chat item
-    const selectedChatItem = document.querySelector('.chat-list-item.active, .chat-list-item[aria-selected="true"], .fui-TreeItem[aria-selected="true"]');
-    if (selectedChatItem) {
-      const chatName = getConversationName(selectedChatItem);
-      if (chatName && chatName !== 'Unknown Conversation') {
-        console.log(`📋 Found current chat from selected item: "${chatName}"`);
-        return chatName;
+    // Method 3: Look for selected conversations with checkboxes
+    const selectedCheckboxes = document.querySelectorAll('.conversation-checkbox:checked');
+    if (selectedCheckboxes.length === 1) {
+      // If exactly one checkbox is selected, use that conversation
+      const checkedItem = selectedCheckboxes[0].closest('.fui-TreeItem, [data-tid="chat-list-item"]');
+      if (checkedItem) {
+        const chatName = getConversationName(checkedItem);
+        if (chatName && chatName !== 'Unknown Conversation') {
+          console.log(`📋 Found current chat from single selected checkbox: "${chatName}"`);
+          return chatName;
+        }
       }
+    } else if (selectedCheckboxes.length > 1) {
+      // Multiple selections - show count and first conversation name
+      const firstCheckedItem = selectedCheckboxes[0].closest('.fui-TreeItem, [data-tid="chat-list-item"]');
+      if (firstCheckedItem) {
+        const firstName = getConversationName(firstCheckedItem);
+        if (firstName && firstName !== 'Unknown Conversation') {
+          console.log(`📋 Found multiple selected chats (${selectedCheckboxes.length}), showing first: "${firstName}"`);
+          return `${selectedCheckboxes.length} chats selected (${firstName}...)`;
+        }
+      }
+      console.log(`📋 Found ${selectedCheckboxes.length} selected chats`);
+      return `${selectedCheckboxes.length} conversations selected`;
     }
     
-    // Fallback: try to get chat name from page title
+    // Method 4: Try to get from page title as last resort
     const pageTitle = document.title;
     if (pageTitle && pageTitle !== 'Microsoft Teams' && !pageTitle.includes('Teams')) {
       const cleanTitle = pageTitle.replace(/\s*\|\s*Microsoft Teams\s*$/i, '').trim();
-      if (cleanTitle.length > 0) {
+      if (cleanTitle.length > 0 && cleanTitle !== 'Microsoft Teams') {
         console.log(`📋 Found current chat from page title: "${cleanTitle}"`);
         return cleanTitle;
       }
     }
     
-    console.log('⚠️ No current chat detected');
+    console.log('⚠️ No current chat detected - showing default message');
     return 'No chat selected';
   };
 
