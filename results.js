@@ -651,6 +651,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatAvatarInitials = document.querySelector('#chat-header .chat-avatar-initials');
   const downloadJsonButton = document.getElementById('download-json-button');
   const downloadHtmlButton = document.getElementById('download-html-button');
+  const clearDataButton = document.getElementById('clear-data-button');
 
   let allConversations = {};
   let currentConversationName = null;
@@ -674,6 +675,18 @@ document.addEventListener('DOMContentLoaded', () => {
     return { initials: initials.toUpperCase(), backgroundColor: randomColor };
   };
 
+  // Function to extract clean name and extraction info from timestamped names
+  const parseConversationName = (fullName) => {
+    // Check if name has timestamp prefix like "[8/29/2025, 11:28:21 AM] Name"
+    const timestampMatch = fullName.match(/^\[([^\]]+)\]\s*(.+)$/);
+    if (timestampMatch) {
+      const extractionTime = timestampMatch[1];
+      const cleanName = timestampMatch[2];
+      return { cleanName, extractionTime, isTimestamped: true };
+    }
+    return { cleanName: fullName, extractionTime: null, isTimestamped: false };
+  };
+
   // Function to render the chat list
   const renderChatList = () => {
     chatList.innerHTML = '';
@@ -682,10 +695,8 @@ document.addEventListener('DOMContentLoaded', () => {
       listItem.classList.add('chat-list-item');
       listItem.dataset.conversationName = name;
 
-      const avatarData = generateAvatar(name);
-      const latestMessage = allConversations[name][allConversations[name].length - 1];
-      const previewText = latestMessage ? `${latestMessage.author}: ${latestMessage.message}` : 'No messages';
-      const timestampText = latestMessage ? latestMessage.timestamp : '';
+      const { cleanName, extractionTime } = parseConversationName(name);
+      const avatarData = generateAvatar(cleanName);
 
       listItem.innerHTML = `
         <div class="chat-list-item-avatar-wrapper">
@@ -695,10 +706,9 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
         <div class="chat-list-item-content">
           <div class="chat-list-item-header">
-            <span class="chat-list-item-title">${name}</span>
-            <span class="chat-list-item-timestamp">${timestampText}</span>
+            <span class="chat-list-item-title">${cleanName}</span>
           </div>
-          <div class="chat-list-item-preview">${previewText}</div>
+          <div class="chat-list-item-extraction-date">${extractionTime || ''}</div>
         </div>
         <div class="chat-list-item-actions">
           <button type="button" class="fui-Button chat-list-item-more-button">
@@ -717,7 +727,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         // Add active class to clicked item
         listItem.classList.add('active');
-        currentConversationName = name; // Set current conversation
+        currentConversationName = name; // Set current conversation (use full name for data lookup)
         renderMessages(name, globalSearchInput.value, avatarData.initials, avatarData.backgroundColor); // Render all messages for the selected conversation
       });
       chatList.appendChild(listItem);
@@ -726,7 +736,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Function to render messages for a selected conversation, with optional search term and avatar data
   const renderMessages = (conversationName, searchTerm = '', initials = '', backgroundColor = '') => {
-    chatTitle.textContent = conversationName;
+    const { cleanName } = parseConversationName(conversationName);
+    chatTitle.textContent = cleanName;
     
     // Update avatar
     chatAvatarInitials.textContent = initials;
@@ -809,10 +820,35 @@ document.addEventListener('DOMContentLoaded', () => {
       reader.onload = (e) => {
         try {
           const uploadedData = JSON.parse(e.target.result);
-          allConversations = uploadedData; // Overwrite with uploaded data
+          
+          // Add uploaded data with timestamp prefix instead of replacing
+          const timestamp = new Date().toLocaleString();
+          const fileName = file.name.replace('.json', '');
+          
+          Object.keys(uploadedData).forEach(conversationName => {
+            const newName = `[${fileName}] ${conversationName}`;
+            allConversations[newName] = uploadedData[conversationName];
+          });
+          
           renderChatList();
-          chatTitle.textContent = 'Select a conversation';
-          messageList.innerHTML = '';
+          
+          // Automatically select the first uploaded conversation
+          const firstUploadedName = `[${fileName}] ${Object.keys(uploadedData)[0]}`;
+          if (Object.keys(uploadedData).length > 0) {
+            const firstListItem = document.querySelector(`[data-conversation-name="${firstUploadedName}"]`);
+            if (firstListItem) {
+              // Remove active from previous items
+              document.querySelectorAll('.chat-list-item').forEach(item => {
+                item.classList.remove('active');
+              });
+              firstListItem.classList.add('active');
+              
+              currentConversationName = firstUploadedName;
+              const avatarData = generateAvatar(firstUploadedName);
+              renderMessages(firstUploadedName, '', avatarData.initials, avatarData.backgroundColor);
+            }
+          }
+          
           globalSearchInput.value = ''; // Clear search on new upload
         } catch (error) {
           alert('Invalid JSON file. Please upload a valid JSON.');
@@ -887,39 +923,68 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initial load: check if data is passed from background script
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "displayData" && request.data) {
-      allConversations = request.data;
+      // Merge new conversations with existing ones instead of replacing
+      const timestamp = new Date().toLocaleString();
+      Object.keys(request.data).forEach(conversationName => {
+        const newName = `[${timestamp}] ${conversationName}`;
+        allConversations[newName] = request.data[conversationName];
+      });
+      
       renderChatList();
-      // Optionally select the first conversation by default
-      if (Object.keys(allConversations).length > 0) {
-        const firstConversationName = Object.keys(allConversations)[0];
-        const firstListItem = document.querySelector(`[data-conversation-name="${firstConversationName}"]`);
+      // Optionally select the first NEW conversation by default
+      const newConversationNames = Object.keys(request.data).map(name => `[${timestamp}] ${name}`);
+      if (newConversationNames.length > 0) {
+        const firstNewName = newConversationNames[0];
+        const firstListItem = document.querySelector(`[data-conversation-name="${firstNewName}"]`);
         if (firstListItem) {
+          // Remove active from previous items
+          document.querySelectorAll('.chat-list-item').forEach(item => {
+            item.classList.remove('active');
+          });
           firstListItem.classList.add('active');
         }
-        currentConversationName = firstConversationName; // Set current conversation
-        const firstAvatarData = generateAvatar(firstConversationName);
-        renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
+        currentConversationName = firstNewName; // Set current conversation
+        const firstAvatarData = generateAvatar(firstNewName);
+        renderMessages(firstNewName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
       }
     }
   });
 
-  // If the page is opened directly (e.g., for testing), try to load from storage
-  // This part might not be strictly necessary if always opened via background script
-  // but can be useful for development.
-  chrome.storage.local.get(['teamsChatData'], (result) => {
-    if (result.teamsChatData) {
-      allConversations = result.teamsChatData;
+  // Handle clear data button
+  clearDataButton.addEventListener('click', () => {
+    if (confirm('Are you sure you want to clear all conversation data? This cannot be undone.')) {
+      allConversations = {};
+      currentConversationName = null;
+      chrome.storage.local.remove(['teamsChatData', 'savedExtractions']);
       renderChatList();
-      if (Object.keys(allConversations).length > 0) {
-        const firstConversationName = Object.keys(allConversations)[0];
-        const firstListItem = document.querySelector(`[data-conversation-name="${firstConversationName}"]`);
-        if (firstListItem) {
-          firstListItem.classList.add('active');
-        }
-        currentConversationName = firstConversationName; // Set current conversation
-        const firstAvatarData = generateAvatar(firstConversationName);
-        renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
+      document.getElementById('chat-title').textContent = 'Select a conversation';
+      document.getElementById('message-list').innerHTML = '';
+    }
+  });
+
+  // Load both current extraction and all saved extractions
+  chrome.storage.local.get(['teamsChatData', 'savedExtractions'], (result) => {
+    // Load all saved extractions first
+    if (result.savedExtractions) {
+      allConversations = result.savedExtractions;
+    }
+    
+    // If there's a current extraction, it will be shown first automatically via displayData message
+    // But if opened directly, show the current extraction
+    if (result.teamsChatData && !result.savedExtractions) {
+      allConversations = result.teamsChatData;
+    }
+    
+    renderChatList();
+    if (Object.keys(allConversations).length > 0) {
+      const firstConversationName = Object.keys(allConversations)[0];
+      const firstListItem = document.querySelector(`[data-conversation-name="${firstConversationName}"]`);
+      if (firstListItem) {
+        firstListItem.classList.add('active');
       }
+      currentConversationName = firstConversationName; // Set current conversation
+      const firstAvatarData = generateAvatar(firstConversationName);
+      renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
     }
   });
 });

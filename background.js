@@ -10,8 +10,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
     });
   } else if (request.action === "download") {
-    chrome.storage.local.set({teamsChatData: request.data}, () => {
-      chrome.tabs.create({url: chrome.runtime.getURL("results.html")});
+    // Get existing saved extractions
+    chrome.storage.local.get(['savedExtractions'], (result) => {
+      const savedExtractions = result.savedExtractions || {};
+      
+      // Add new extraction with timestamp
+      const timestamp = new Date().toLocaleString();
+      Object.keys(request.data).forEach(conversationName => {
+        const newName = `[${timestamp}] ${conversationName}`;
+        savedExtractions[newName] = request.data[conversationName];
+      });
+      
+      // Save accumulated data
+      chrome.storage.local.set({
+        teamsChatData: request.data, // Current extraction for immediate display
+        savedExtractions: savedExtractions // All accumulated extractions
+      }, () => {
+        // Open in new tab each time
+        chrome.tabs.create({url: chrome.runtime.getURL("results.html")});
+      });
     });
   }
 });

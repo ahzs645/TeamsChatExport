@@ -40,7 +40,7 @@ body {
     display: none;
 }
 
-#download-json-button, #download-html-button {
+#download-json-button, #download-html-button, #clear-data-button {
     background-color: #5B5FC5;
     color: white;
     padding: 7px 10px;
@@ -51,8 +51,16 @@ body {
     margin-left: 10px; /* Space between buttons */
 }
 
+#clear-data-button {
+    background-color: #dc3545; /* Red background for clear button */
+}
+
 #download-json-button:hover, #download-html-button:hover {
     background-color: #4a4d9e;
+}
+
+#clear-data-button:hover {
+    background-color: #c82333;
 }
 
 .search-container {
@@ -134,6 +142,9 @@ body {
     display: flex;
     align-items: center;
     position: relative;
+    overflow: hidden; /* Prevent horizontal overflow */
+    width: 100%; /* Ensure full width */
+    box-sizing: border-box; /* Include padding in width calculation */
 }
 
 .chat-list-item:hover, .chat-list-item.active {
@@ -167,11 +178,12 @@ body {
     flex-grow: 1;
     display: flex;
     flex-direction: column;
+    overflow: hidden; /* Prevent content from overflowing */
+    min-width: 0; /* Allow flex item to shrink */
 }
 
 .chat-list-item-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
 }
 
@@ -179,19 +191,17 @@ body {
     font-weight: normal;
     font-size: 16px;
     color: #333;
-}
-
-.chat-list-item-timestamp {
-    font-size: 12px;
-    color: #666;
-}
-
-.chat-list-item-preview {
-    font-size: 12px;
-    color: #666;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+    max-width: 120px; /* Ensure title doesn't overflow */
+}
+
+.chat-list-item-extraction-date {
+    font-size: 10px;
+    color: #999;
+    font-style: italic;
+    margin-top: 2px;
 }
 
 .chat-list-item-actions {
