@@ -444,9 +444,11 @@
     }
 
     try {
-      chrome.runtime.sendMessage({action: 'updateSelectionState', allSelected: allSelected, selectedCount: selectedCount});
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({action: 'updateSelectionState', allSelected: allSelected, selectedCount: selectedCount});
+      }
     } catch (error) {
-      console.warn("Extension context invalidated, could not send selection state update.");
+      // Silently ignore extension context issues
     }
   };
 
@@ -574,8 +576,35 @@
       if (conversationName) {
         console.log(`\n[->] Processing conversation: "${conversationName}"`);
         
-        // Click the item to open the conversation
-        item.click();
+        // Try multiple click strategies for Fluent UI
+        let clicked = false;
+        
+        // Strategy 1: Look for the main clickable container (multiple selectors for different layouts)
+        const containerSelectors = [
+          '.fui-TreeItemLayout',
+          '[data-inp*="chat-switch"]',
+          '[data-inp*="collab-unified-chat-switch"]',
+          '.fui-TreeItem-content',
+          '[role="treeitem"] > div'
+        ];
+        
+        for (const selector of containerSelectors) {
+          const clickableContainer = item.querySelector(selector);
+          if (clickableContainer && !clicked) {
+            console.log(`🖱️ Clicking Fluent UI container with selector: ${selector}`);
+            clickableContainer.click();
+            clicked = true;
+            break;
+          }
+        }
+        
+        // Strategy 2: Try clicking the item itself if container click failed
+        if (!clicked) {
+          console.log('🖱️ Clicking tree item directly');
+          item.click();
+          clicked = true;
+        }
+        
         await delay(DELAY_BETWEEN_CLICKS_MS);
         
         // Extract messages using New Teams selectors
@@ -591,7 +620,12 @@
     console.log(`📊 Total conversations extracted: ${Object.keys(allConversations).length}`);
     
     try {
-      chrome.runtime.sendMessage({action: "download", data: allConversations});
+      if (chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({action: "download", data: allConversations});
+      } else {
+        console.error("Extension context invalidated. Please refresh the page and try again.");
+        alert("Extension context was invalidated. Please refresh the page and try again.");
+      }
     } catch (error) {
       console.error("Extension context invalidated. Please refresh the page and try again.", error);
       alert("Extension context was invalidated. Please refresh the page and try again.");
