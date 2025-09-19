@@ -3,7 +3,7 @@
  * Handles checkbox creation, management, and state tracking
  */
 
-import { TeamsDetection } from './teamsDetection.js';
+import { TeamsVariantDetector } from './teamsVariantDetector.js';
 
 export class CheckboxManager {
   constructor() {
@@ -73,7 +73,7 @@ export class CheckboxManager {
   addCheckboxes() {
     if (!this.settings.showCheckboxes) return;
     
-    const teamsConfig = TeamsDetection.getTeamsVariantSelectors();
+    const teamsConfig = TeamsVariantDetector.getTeamsVariantSelectors();
     let chatListItems = [];
     
     // Only log once to avoid spam
@@ -211,7 +211,7 @@ export class CheckboxManager {
   getState() {
     return {
       checkboxesEnabled: this.settings.showCheckboxes,
-      currentChat: TeamsDetection.getCurrentChatTitle()
+      currentChat: TeamsVariantDetector.getCurrentChatTitle()
     };
   }
 
@@ -219,7 +219,7 @@ export class CheckboxManager {
    * Gets selected chat items
    */
   getSelectedChatItems() {
-    const teamsConfig = TeamsDetection.getTeamsVariantSelectors();
+    const teamsConfig = TeamsVariantDetector.getTeamsVariantSelectors();
     let chatListItems = [];
     
     for (const selector of teamsConfig.chatItems) {
