@@ -418,6 +418,24 @@ body {
     color: #666;
 }
 
+.message-divider {
+    text-align: center;
+    color: #666;
+    font-weight: 600;
+    margin: 20px 0 15px;
+}
+
+.message-container.system {
+    align-items: center;
+    color: #555;
+}
+
+.message-container.system .message-bubble {
+    background-color: #f0f0f5;
+    color: #333;
+    margin: 0 auto;
+}
+
 .message-container.consecutive-message {
     margin-top: -10px; /* Adjust as needed to make them tighter */
 }

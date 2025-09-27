@@ -16,13 +16,27 @@
  * - ExtractionEngine for orchestrating the extraction process
  */
 
-import { TeamsVariantDetector } from './src/modules/teamsVariantDetector.js';
-import { CheckboxManager } from './src/modules/checkboxManager.js';
-import { ExtractionEngine } from './src/modules/extractionEngine.js';
-import { UIManager } from './src/modules/uiManager.js';
-import { StorageManager } from './src/modules/storageManager.js';
-
 (async () => {
+  const [
+    teamsModule,
+    checkboxModule,
+    extractionModule,
+    uiModule,
+    storageModule
+  ] = await Promise.all([
+    import(chrome.runtime.getURL('src/modules/teamsVariantDetector.js')),
+    import(chrome.runtime.getURL('src/modules/checkboxManager.js')),
+    import(chrome.runtime.getURL('src/modules/extractionEngine.js')),
+    import(chrome.runtime.getURL('src/modules/uiManager.js')),
+    import(chrome.runtime.getURL('src/modules/storageManager.js'))
+  ]);
+
+  const { TeamsVariantDetector } = teamsModule;
+  const { CheckboxManager } = checkboxModule;
+  const { ExtractionEngine } = extractionModule;
+  const { UIManager } = uiModule;
+  const { StorageManager } = storageModule;
+
   console.log('🚀 Teams Chat Extractor - Improved Modular Version Starting...');
   
   // Initialize modules

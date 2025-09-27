@@ -163,6 +163,17 @@ body {
     text-align: right;
 }
 
+.message-divider {
+    text-align: center;
+    color: #666;
+    font-weight: 600;
+    margin: 20px 0 15px;
+}
+
+.message-container.system {
+    text-align: center;
+}
+
 .message-details {
     font-size: 12px;
     color: #666;
@@ -183,6 +194,12 @@ body {
     color: white !important;
     margin-left: auto !important;
     margin-right: 0 !important;
+}
+
+.message-container.system .message-bubble {
+    background-color: #f0f0f5;
+    color: #333;
+    margin: 0 auto;
 }
 
 .consecutive-message .message-bubble {
@@ -431,43 +448,80 @@ body {
       const TIME_THRESHOLD_MS = 3 * 60 * 1000;
       
       messages.forEach(msg => {
+        if (msg.type === 'divider') {
+          const dividerEl = document.createElement('div');
+          dividerEl.classList.add('message-divider');
+          dividerEl.textContent = msg.message;
+          messageList.appendChild(dividerEl);
+          lastAuthor = null;
+          lastTimestamp = null;
+          return;
+        }
+
         const messageContainer = document.createElement('div');
         messageContainer.classList.add('message-container');
-        messageContainer.classList.add(msg.type);
-        
-        const currentTimestamp = new Date(msg.timestamp).getTime();
-        
-        if (msg.author !== lastAuthor || (lastTimestamp && (currentTimestamp - lastTimestamp) > TIME_THRESHOLD_MS)) {
-          const messageDetails = document.createElement('div');
-          messageDetails.classList.add('message-details');
-          messageDetails.textContent = msg.author + ' - ' + msg.timestamp;
-          messageContainer.appendChild(messageDetails);
-        } else {
-          messageContainer.classList.add('consecutive-message');
+
+        const timestampDate = msg.isoTimestamp ? new Date(msg.isoTimestamp) : (msg.timestamp ? new Date(msg.timestamp) : null);
+        const timestampMillis = timestampDate && !Number.isNaN(timestampDate.getTime())
+          ? timestampDate.getTime()
+          : null;
+
+        const authorLabel = msg.author || 'Unknown';
+        const messageType = msg.type || null;
+        const isSystemMessage = messageType === 'system';
+
+        if (!isSystemMessage) {
+          if (
+            msg.author !== lastAuthor ||
+            (lastTimestamp !== null && timestampMillis !== null && (timestampMillis - lastTimestamp) > TIME_THRESHOLD_MS)
+          ) {
+            const messageDetails = document.createElement('div');
+            messageDetails.classList.add('message-details');
+            messageDetails.textContent = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+            messageContainer.appendChild(messageDetails);
+          } else {
+            messageContainer.classList.add('consecutive-message');
+          }
         }
-        
+
         const messageBubble = document.createElement('div');
         messageBubble.classList.add('message-bubble');
-        
-        // Determine if message is from current user (sent) or others (received)
+
         const isFromCurrentUser = currentUser && msg.author === currentUser;
-        if (isFromCurrentUser) {
+        const bubbleType = messageType || (isFromCurrentUser ? 'sent' : 'received');
+        const isSent = bubbleType === 'sent';
+
+        messageContainer.classList.add(bubbleType);
+
+        if (isSystemMessage) {
+          messageContainer.style.textAlign = 'center';
+        } else if (isSent) {
           messageBubble.classList.add('sent-message');
           messageContainer.style.textAlign = 'right';
-          messageContainer.classList.add('sent');
-        } else {
-          messageContainer.classList.add('received');
         }
-        
+
         const messageText = document.createElement('div');
-        messageText.textContent = msg.message;
-        
+        const messageBody = (msg.message || msg.content || '').trim();
+        if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
+          return;
+        }
+        messageText.textContent = messageBody;
+
         messageBubble.appendChild(messageText);
         messageContainer.appendChild(messageBubble);
         messageList.appendChild(messageContainer);
-        
-        lastAuthor = msg.author;
-        lastTimestamp = currentTimestamp;
+
+        if (isSystemMessage) {
+          lastAuthor = null;
+          if (timestampMillis !== null) {
+            lastTimestamp = timestampMillis;
+          }
+        } else {
+          lastAuthor = msg.author;
+          if (timestampMillis !== null) {
+            lastTimestamp = timestampMillis;
+          }
+        }
       });
       
       messageList.scrollTop = messageList.scrollHeight;
@@ -483,9 +537,14 @@ body {
         listItem.classList.add('chat-list-item');
         
         const avatarData = generateAvatar(name);
-        const latestMessage = allConversations[name][allConversations[name].length - 1];
-        const previewText = latestMessage ? latestMessage.author + ': ' + latestMessage.message : 'No messages';
-        const timestampText = latestMessage ? latestMessage.timestamp : '';
+        const messages = allConversations[name] || [];
+        const latestMessage = [...messages].reverse().find(msg => msg.type !== 'divider' && msg.type !== 'system');
+        const previewAuthor = latestMessage?.author || '';
+        const previewBody = latestMessage?.message || latestMessage?.content || '';
+        const previewText = latestMessage
+          ? (previewAuthor ? previewAuthor + ': ' : '') + previewBody
+          : 'No messages';
+        const timestampText = latestMessage && latestMessage.timestamp ? latestMessage.timestamp : '';
         
         listItem.innerHTML = \`
           <div class="chat-list-item-avatar-wrapper">
@@ -652,9 +711,12 @@ document.addEventListener('DOMContentLoaded', () => {
   const downloadJsonButton = document.getElementById('download-json-button');
   const downloadHtmlButton = document.getElementById('download-html-button');
   const clearDataButton = document.getElementById('clear-data-button');
+  const currentUserDisplay = document.getElementById('current-user-display');
 
   let allConversations = {};
   let currentConversationName = null;
+  let currentUser = null;
+  let selectedUserOption = null;
 
   // Function to generate initials and a random pastel background color
   const generateAvatar = (name) => {
@@ -754,10 +816,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Filter messages if a search term is provided
     if (searchTerm) {
       const lowerCaseSearchTerm = searchTerm.toLowerCase();
-      messages = messages.filter(msg => 
-        msg.author.toLowerCase().includes(lowerCaseSearchTerm) ||
-        msg.message.toLowerCase().includes(lowerCaseSearchTerm)
-      );
+      messages = messages.filter((msg) => {
+        const authorText = (msg.author || '').toLowerCase();
+        const bodyText = (msg.message || msg.content || '').toLowerCase();
+        return authorText.includes(lowerCaseSearchTerm) || bodyText.includes(lowerCaseSearchTerm);
+      });
       if (messages.length === 0) {
         messageList.innerHTML = '<p style="text-align: center; color: #666;">No messages found matching your search.</p>';
         return;
@@ -768,49 +831,186 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastTimestamp = null;
     const TIME_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes in milliseconds
 
-    messages.forEach(msg => {
+    messages.forEach((msg) => {
+      if (msg.type === 'divider') {
+        const dividerEl = document.createElement('div');
+        dividerEl.classList.add('message-divider');
+        dividerEl.textContent = msg.message;
+        messageList.appendChild(dividerEl);
+        lastAuthor = null;
+        lastTimestamp = null;
+        return;
+      }
+
       const messageContainer = document.createElement('div');
       messageContainer.classList.add('message-container');
-      messageContainer.classList.add(msg.type);
 
-      const currentTimestamp = new Date(msg.timestamp).getTime();
+      const timestampDate = msg.isoTimestamp ? new Date(msg.isoTimestamp) : (msg.timestamp ? new Date(msg.timestamp) : null);
+      const timestampMillis = timestampDate && !Number.isNaN(timestampDate.getTime())
+        ? timestampDate.getTime()
+        : null;
 
-      // Only show message details if author is different from previous message
-      // OR if the same author sends a message after a significant time gap
-      if (msg.author !== lastAuthor || (lastTimestamp && (currentTimestamp - lastTimestamp) > TIME_THRESHOLD_MS)) {
-        const messageDetails = document.createElement('div');
-        messageDetails.classList.add('message-details');
-        messageDetails.textContent = `${msg.author} - ${msg.timestamp}`;
-        messageContainer.appendChild(messageDetails);
-      } else {
-        messageContainer.classList.add('consecutive-message');
+      const authorLabel = msg.author || 'Unknown';
+      const messageType = msg.type || null;
+      const isSystemMessage = messageType === 'system';
+
+      if (!isSystemMessage) {
+        if (
+          msg.author !== lastAuthor ||
+          (lastTimestamp !== null && timestampMillis !== null && (timestampMillis - lastTimestamp) > TIME_THRESHOLD_MS)
+        ) {
+          const messageDetails = document.createElement('div');
+          messageDetails.classList.add('message-details');
+          messageDetails.textContent = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+          messageContainer.appendChild(messageDetails);
+        } else {
+          messageContainer.classList.add('consecutive-message');
+        }
       }
 
       const messageBubble = document.createElement('div');
       messageBubble.classList.add('message-bubble');
-      
-      // Add special styling for Ahmad's messages (sent messages)
-      if (msg.type === 'sent' || (msg.author && msg.author.toLowerCase().includes('ahmad'))) {
+
+      const isFromCurrentUser = currentUser && msg.author === currentUser;
+      const bubbleType = messageType || (isFromCurrentUser ? 'sent' : 'received');
+      const isSent = bubbleType === 'sent';
+
+      messageContainer.classList.add(bubbleType);
+
+      if (isSystemMessage) {
+        messageContainer.style.textAlign = 'center';
+      } else if (isSent) {
         messageBubble.classList.add('sent-message');
-        messageBubble.style.backgroundColor = '#8B5FBF';
-        messageBubble.style.color = 'white';
-        messageBubble.style.marginLeft = 'auto';
-        messageBubble.style.marginRight = '0';
         messageContainer.style.textAlign = 'right';
       }
 
       const messageText = document.createElement('div');
-      messageText.textContent = msg.message;
+      const messageBody = (msg.message || msg.content || '').trim();
+      if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
+        return;
+      }
+      messageText.textContent = messageBody;
 
       messageBubble.appendChild(messageText);
       messageContainer.appendChild(messageBubble);
       messageList.appendChild(messageContainer);
 
-      lastAuthor = msg.author;
-      lastTimestamp = currentTimestamp;
+      if (isSystemMessage) {
+        lastAuthor = null;
+        if (timestampMillis !== null) {
+          lastTimestamp = timestampMillis;
+        }
+      } else {
+        lastAuthor = msg.author;
+        if (timestampMillis !== null) {
+          lastTimestamp = timestampMillis;
+        }
+      }
     });
     messageList.scrollTop = messageList.scrollHeight; // Scroll to bottom
   };
+
+  const getAllUsers = () => {
+    const users = new Set();
+    Object.values(allConversations).forEach((messages) => {
+      messages.forEach((msg) => {
+        if (msg.author && msg.author.trim()) {
+          users.add(msg.author);
+        }
+      });
+    });
+    return Array.from(users).sort();
+  };
+
+  const getUserMessageCount = (userName) => {
+    let count = 0;
+    Object.values(allConversations).forEach((messages) => {
+      messages.forEach((msg) => {
+        if (msg.author === userName) {
+          count += 1;
+        }
+      });
+    });
+    return count;
+  };
+
+  const showUserSelection = () => {
+    const modal = document.getElementById('user-selection-modal');
+    const userList = document.getElementById('user-list');
+    const confirmButton = document.getElementById('confirm-btn');
+
+    if (!modal || !userList || !confirmButton) {
+      return;
+    }
+
+    const users = getAllUsers();
+
+    userList.innerHTML = '';
+    selectedUserOption = null;
+
+    users.forEach((userName) => {
+      const messageCount = getUserMessageCount(userName);
+      const avatarData = generateAvatar(userName);
+
+      const userOption = document.createElement('div');
+      userOption.className = 'user-option';
+      userOption.dataset.userName = userName;
+
+      if (currentUser === userName) {
+        userOption.classList.add('selected');
+        selectedUserOption = userOption;
+      }
+
+      userOption.innerHTML = `
+        <div class="user-avatar" style="background-color: ${avatarData.backgroundColor};">
+          ${avatarData.initials}
+        </div>
+        <div class="user-info">
+          <div class="user-name">${userName}</div>
+          <div class="user-message-count">${messageCount} messages</div>
+        </div>
+      `;
+
+      userOption.addEventListener('click', () => {
+        if (selectedUserOption) {
+          selectedUserOption.classList.remove('selected');
+        }
+        userOption.classList.add('selected');
+        selectedUserOption = userOption;
+        confirmButton.disabled = false;
+      });
+
+      userList.appendChild(userOption);
+    });
+
+    modal.style.display = 'flex';
+    confirmButton.disabled = !selectedUserOption;
+  };
+
+  const closeUserSelection = () => {
+    const modal = document.getElementById('user-selection-modal');
+    if (modal) {
+      modal.style.display = 'none';
+    }
+    selectedUserOption = null;
+  };
+
+  const confirmUserSelection = () => {
+    if (selectedUserOption) {
+      currentUser = selectedUserOption.dataset.userName;
+      if (currentUserDisplay) {
+        currentUserDisplay.textContent = 'You: ' + currentUser;
+      }
+      if (currentConversationName) {
+        renderMessages(currentConversationName);
+      }
+    }
+    closeUserSelection();
+  };
+
+  window.showUserSelection = showUserSelection;
+  window.closeUserSelection = closeUserSelection;
+  window.confirmUserSelection = confirmUserSelection;
 
   // Handle file upload
   fileUpload.addEventListener('change', (event) => {
@@ -955,6 +1155,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (confirm('Are you sure you want to clear all conversation data? This cannot be undone.')) {
       allConversations = {};
       currentConversationName = null;
+      currentUser = null;
+      if (currentUserDisplay) {
+        currentUserDisplay.textContent = 'No user selected';
+      }
       chrome.storage.local.remove(['teamsChatData', 'savedExtractions']);
       renderChatList();
       document.getElementById('chat-title').textContent = 'Select a conversation';
@@ -964,15 +1168,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Load both current extraction and all saved extractions
   chrome.storage.local.get(['teamsChatData', 'savedExtractions'], (result) => {
-    // Load all saved extractions first
-    if (result.savedExtractions) {
-      allConversations = result.savedExtractions;
-    }
-    
-    // If there's a current extraction, it will be shown first automatically via displayData message
-    // But if opened directly, show the current extraction
-    if (result.teamsChatData && !result.savedExtractions) {
-      allConversations = result.teamsChatData;
+    const savedExtractions = result.savedExtractions || {};
+    const teamsChatData = result.teamsChatData || {};
+
+    const hasSavedExtracts = Object.keys(savedExtractions).length > 0;
+    const hasCurrentExtraction = Object.keys(teamsChatData).length > 0;
+
+    if (hasSavedExtracts) {
+      allConversations = savedExtractions;
+    } else if (hasCurrentExtraction) {
+      allConversations = teamsChatData;
     }
     
     renderChatList();
@@ -985,6 +1190,19 @@ document.addEventListener('DOMContentLoaded', () => {
       currentConversationName = firstConversationName; // Set current conversation
       const firstAvatarData = generateAvatar(firstConversationName);
       renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
+    }
+    if (!currentUser) {
+      const users = getAllUsers();
+      if (users.length === 1) {
+        currentUser = users[0];
+        document.getElementById('current-user-display').textContent = 'You: ' + currentUser;
+      } else if (users.length > 1) {
+        setTimeout(() => {
+          if (!currentUser) {
+            showUserSelection();
+          }
+        }, 300);
+      }
     }
   });
 });

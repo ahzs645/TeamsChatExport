@@ -30,5 +30,47 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         chrome.tabs.create({url: chrome.runtime.getURL("results.html")});
       });
     });
+  } else if (request.action === "openResults") {
+    // Persist the latest extraction and open the results viewer
+    chrome.storage.local.get(['savedExtractions'], (result) => {
+      const savedExtractions = { ...(result.savedExtractions || {}) };
+      const timestamp = new Date().toLocaleString();
+
+      if (request.data) {
+        Object.keys(request.data).forEach((conversationName) => {
+          const newName = `[${timestamp}] ${conversationName}`;
+          savedExtractions[newName] = request.data[conversationName];
+        });
+      }
+
+      chrome.storage.local.set({
+        teamsChatData: request.data || {},
+        savedExtractions
+      }, () => {
+        chrome.tabs.create({ url: chrome.runtime.getURL("results.html") }, (tab) => {
+          if (tab && request.data && Object.keys(request.data).length > 0) {
+            const handleUpdated = (tabId, changeInfo) => {
+              if (tabId === tab.id && changeInfo.status === 'complete') {
+                chrome.tabs.onUpdated.removeListener(handleUpdated);
+                chrome.tabs.sendMessage(tab.id, {
+                  action: 'displayData',
+                  data: request.data
+                }, () => {
+                  if (chrome.runtime.lastError) {
+                    console.warn('Results page message error:', chrome.runtime.lastError.message);
+                  }
+                });
+              }
+            };
+            chrome.tabs.onUpdated.addListener(handleUpdated);
+          }
+
+          if (typeof sendResponse === 'function') {
+            sendResponse({ success: true });
+          }
+        });
+      });
+    });
+    return true;
   }
 });

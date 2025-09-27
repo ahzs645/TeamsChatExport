@@ -89,16 +89,34 @@ export class ExtractionEngine {
           await this.scrollToTopOfChat();
         }
 
-        // Extract messages
-        const messages = this.extractVisibleMessages();
+        if (typeof window.__teamsExtractorMessageSequence !== 'number') {
+          window.__teamsExtractorMessageSequence = 0;
+        }
+
+        const cachedMessages = this.collectCachedMessages();
+
+        // Extract messages currently visible after scrolling
+        const visibleMessages = this.extractVisibleMessages();
+
+        const combinedMessages = this.messageExtractor.prepareMessages(
+          this.messageExtractor.mergeMessages([
+            ...cachedMessages,
+            ...visibleMessages
+          ])
+        );
         
-        if (messages.length > 0) {
-          allConversations[conversationName] = messages;
-          console.log(`✅ Extracted ${messages.length} messages from "${conversationName}"`);
+        if (combinedMessages.length > 0) {
+          allConversations[conversationName] = combinedMessages;
+          const earliestMessage = combinedMessages.find((msg) => msg.isoTimestamp) || combinedMessages[0];
+          const earliestTimestamp = earliestMessage?.timestamp || 'Unknown';
+          console.log(`✅ Extracted ${combinedMessages.length} messages from "${conversationName}" (earliest: ${earliestTimestamp})`);
         } else {
           console.log(`⚠️ No messages found in "${conversationName}"`);
         }
 
+        window.__teamsExtractorMessageCache = undefined;
+        window.__teamsExtractorMessageSequence = undefined;
+      
       } catch (error) {
         console.error(`❌ Error processing conversation ${i + 1}:`, error);
         continue;
@@ -123,5 +141,26 @@ export class ExtractionEngine {
       console.error('❌ Error opening results page:', error);
       alert("Extension context was invalidated. Please refresh the page and try again.");
     }
+  }
+
+  collectCachedMessages() {
+    const cache = window.__teamsExtractorMessageCache;
+    if (!cache || !(cache instanceof Map)) {
+      return [];
+    }
+
+    const entries = Array.from(cache.values()).sort((a, b) => (b.sequence ?? 0) - (a.sequence ?? 0));
+    const parsedMessages = [];
+
+    entries.forEach((value) => {
+      if (!value || !value.html) return;
+      const data = this.messageExtractor.extractFromHTML(value.html);
+      if (data) {
+        data.__sequence = value.sequence ?? (window.__teamsExtractorMessageSequence = (window.__teamsExtractorMessageSequence || 0) + 1);
+        parsedMessages.push(data);
+      }
+    });
+
+    return this.messageExtractor.prepareMessages(parsedMessages);
   }
 }

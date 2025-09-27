@@ -66,6 +66,11 @@ export class ScrollManager {
     const initialScrollTop = chatContainer.scrollTop;
     console.log(`📜 Initial scroll position: ${initialScrollTop}`);
     
+    window.__teamsExtractorMessageCache = new Map();
+    window.__teamsExtractorMessageSequence = 0;
+
+    this.cacheVisibleMessages();
+
     // Scroll to the very top
     chatContainer.scrollTop = 0;
     await this.delay(1000); // Wait for scroll to complete
@@ -89,10 +94,11 @@ export class ScrollManager {
     }
     
     // Perform multiple scroll attempts to ensure all messages are loaded
-    let previousMessageCount = 0;
     let currentMessageCount = this.getVisibleMessageCount();
+    let maxMessageCount = currentMessageCount;
+    let stalledAttempts = 0;
     let attempts = 0;
-    const maxAttempts = 20;
+    const maxAttempts = 25;
     
     console.log(`📜 Starting progressive scroll. Initial message count: ${currentMessageCount}`);
     
@@ -109,19 +115,57 @@ export class ScrollManager {
       
       currentMessageCount = this.getVisibleMessageCount();
       console.log(`📜 Attempt ${attempts + 1}: Found ${currentMessageCount} messages`);
-      
-      // If no new messages loaded, we've reached the top
-      if (currentMessageCount === previousMessageCount) {
-        console.log('📜 No new messages loaded, scrolling complete');
+
+      this.cacheVisibleMessages();
+
+      const clickedLoadMore = this.clickLoadMoreButtons();
+      if (clickedLoadMore) {
+        await this.delay(2500);
+        currentMessageCount = this.getVisibleMessageCount();
+        console.log(`📜 Load more triggered, updated message count: ${currentMessageCount}`);
+        this.cacheVisibleMessages();
+      }
+
+      if (this.pulseVirtualLoader()) {
+        await this.delay(2500);
+        currentMessageCount = this.getVisibleMessageCount();
+        console.log(`📜 Virtual loader pulsed, updated message count: ${currentMessageCount}`);
+        this.cacheVisibleMessages();
+      }
+
+      if (currentMessageCount > maxMessageCount) {
+        maxMessageCount = currentMessageCount;
+        stalledAttempts = 0;
+      } else {
+        stalledAttempts += 1;
+      }
+
+      // If Teams has virtualised away the oldest DOM nodes while we scrolled, scroll down a bit to let it reuse the buffer
+      if (currentMessageCount < maxMessageCount) {
+        chatContainer.scrollTop = Math.min(chatContainer.scrollHeight, chatContainer.scrollTop + chatContainer.clientHeight * 0.5);
+        await this.delay(750);
+        chatContainer.scrollTop = 0;
+        await this.delay(1500);
+        currentMessageCount = this.getVisibleMessageCount();
+        console.log(`📜 Recovered count after buffer adjustment: ${currentMessageCount}`);
+        if (currentMessageCount > maxMessageCount) {
+          maxMessageCount = currentMessageCount;
+          stalledAttempts = 0;
+        }
+        this.cacheVisibleMessages();
+      }
+
+      if (stalledAttempts >= 3) {
+        console.log('📜 No additional messages detected after multiple attempts, stopping scroll');
         break;
       }
-      
-      previousMessageCount = currentMessageCount;
+
       attempts++;
     }
-    
+
     console.log(`📜 Scroll complete. Final message count: ${currentMessageCount}`);
-    
+    this.cacheVisibleMessages();
+
     // Final scroll to ensure we're at the very top
     chatContainer.scrollTop = 0;
     await this.delay(1000);
@@ -139,15 +183,128 @@ export class ScrollManager {
       '[data-tid="message"]',
       '[role="article"]'
     ];
-    
+
     for (const selector of messageSelectors) {
       const messages = document.querySelectorAll(selector);
       if (messages.length > 0) {
         return messages.length;
       }
     }
-    
+
     return 0;
+  }
+
+  /**
+   * Cache currently visible messages for later reconstruction
+   */
+  cacheVisibleMessages() {
+    if (!window.__teamsExtractorMessageCache) {
+      window.__teamsExtractorMessageCache = new Map();
+    }
+
+    if (typeof window.__teamsExtractorMessageSequence !== 'number') {
+      window.__teamsExtractorMessageSequence = 0;
+    }
+
+    const cache = window.__teamsExtractorMessageCache;
+
+    const messageSelectors = [
+      '[data-tid="chat-pane-item"]',
+      '.fui-unstable-ChatItem'
+    ];
+
+    let nodes = [];
+    messageSelectors.some((selector) => {
+      nodes = Array.from(document.querySelectorAll(selector));
+      return nodes.length > 0;
+    });
+
+    nodes.forEach((node) => {
+      const mid = node.getAttribute('data-mid') || node.dataset?.mid || node.getAttribute('id');
+      const author = node.querySelector('[data-tid="message-author-name"]')?.textContent?.trim() || '';
+      const timestamp = node.querySelector('[data-tid="message-timestamp"], time')?.textContent?.trim() || '';
+      const textPreview = node.textContent?.trim().slice(0, 60) || '';
+      const key = mid || `${timestamp}::${author}::${textPreview}`;
+
+      if (!cache.has(key)) {
+        window.__teamsExtractorMessageSequence += 1;
+        cache.set(key, {
+          html: node.outerHTML,
+          sequence: window.__teamsExtractorMessageSequence
+        });
+      }
+    });
+  }
+
+  /**
+   * Attempts to click any available load-more buttons to fetch older messages
+   */
+  clickLoadMoreButtons() {
+    const loadButtonSelectors = [
+      'button[data-tid*="load" i]',
+      'button[data-testid*="load" i]',
+      'button[aria-label*="older" i]',
+      'button[aria-label*="load" i]',
+      'div[role="button"][data-tid*="load" i]'
+    ];
+
+    let clicked = false;
+
+    loadButtonSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((button) => {
+        if (!button || typeof button.click !== 'function') {
+          return;
+        }
+
+        if (button.dataset?.teamsExtractorClicked === 'true') {
+          return;
+        }
+
+        const label = (button.textContent || button.getAttribute('aria-label') || '').toLowerCase();
+        if (label.includes('older') || label.includes('load')) {
+          console.log('🔁 Clicking load-more button to fetch older messages');
+          button.dataset.teamsExtractorClicked = 'true';
+          button.click();
+          clicked = true;
+        }
+      });
+    });
+
+    return clicked;
+  }
+
+  pulseVirtualLoader() {
+    let pulsed = false;
+    const loaderSelectors = [
+      '[data-testid="virtual-list-loader"]',
+      '[data-testid="vl-placeholders"]'
+    ];
+
+    loaderSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((loader) => {
+        if (!(loader instanceof HTMLElement)) {
+          return;
+        }
+
+        console.log('🔁 Pulsing virtual loader to keep early messages in buffer');
+        loader.style.display = 'none';
+        pulsed = true;
+      });
+    });
+
+    if (pulsed) {
+      setTimeout(() => {
+        loaderSelectors.forEach((selector) => {
+          document.querySelectorAll(selector).forEach((loader) => {
+            if (loader instanceof HTMLElement) {
+              loader.style.display = '';
+            }
+          });
+        });
+      }, 200);
+    }
+
+    return pulsed;
   }
 
   /**
