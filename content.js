@@ -4,27 +4,32 @@
  * This script automates the process of extracting full chat conversations,
  * including the author, timestamp, and message content for each message.
  *
- * VERSION 6 - MODULAR ARCHITECTURE
+ * VERSION 7 - IMPROVED MODULAR ARCHITECTURE
  * 
- * This version has been refactored into a modular architecture with separate modules for:
- * - Teams detection and variant handling
- * - Checkbox management and UI state
- * - Message extraction and auto-scrolling
- * - Button and tooltip management
+ * This version has been refactored with improved ES6 modules:
+ * - TeamsVariantDetector for Teams detection and variant handling
+ * - CheckboxManager for checkbox management and UI state
+ * - MessageExtractor for message extraction
+ * - ScrollManager for auto-scrolling functionality
+ * - UIManager for button and UI management
+ * - StorageManager for settings persistence
+ * - ExtractionEngine for orchestrating the extraction process
  */
 
-import { TeamsDetection } from './src/modules/teamsDetection.js';
+import { TeamsVariantDetector } from './src/modules/teamsVariantDetector.js';
 import { CheckboxManager } from './src/modules/checkboxManager.js';
 import { ExtractionEngine } from './src/modules/extractionEngine.js';
-import { ButtonManager } from './src/modules/buttonManager.js';
+import { UIManager } from './src/modules/uiManager.js';
+import { StorageManager } from './src/modules/storageManager.js';
 
 (async () => {
-  console.log('🚀 Teams Chat Extractor - Modular Version Starting...');
+  console.log('🚀 Teams Chat Extractor - Improved Modular Version Starting...');
   
   // Initialize modules
+  const storageManager = new StorageManager();
   const extractionEngine = new ExtractionEngine();
   const checkboxManager = new CheckboxManager();
-  const buttonManager = new ButtonManager(extractionEngine, checkboxManager);
+  const uiManager = new UIManager(extractionEngine, checkboxManager);
   
   // Initialize settings with defaults
   window.teamsExtractorSettings = { 
@@ -32,8 +37,19 @@ import { ButtonManager } from './src/modules/buttonManager.js';
     autoScroll: true 
   };
 
-  // Inject checkbox styles
-  checkboxManager.injectStylesheet();
+  // Load and migrate settings
+  await storageManager.migrateSettings();
+  const settings = await storageManager.loadSettings();
+  
+  // Apply loaded settings
+  window.teamsExtractorSettings.showCheckboxes = settings.checkboxesEnabled;
+  window.teamsExtractorSettings.autoScroll = settings.autoScrollEnabled;
+  
+  checkboxManager.settings.showCheckboxes = settings.checkboxesEnabled;
+  extractionEngine.setAutoScroll(settings.autoScrollEnabled);
+
+  // Inject UI styles
+  uiManager.injectStylesheet();
 
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -43,17 +59,20 @@ import { ButtonManager } from './src/modules/buttonManager.js';
         checkboxManager.settings.showCheckboxes = request.enabled;
         checkboxManager.toggleCheckboxes(request.enabled);
         
+        // Save setting
+        storageManager.saveCheckboxState(request.enabled);
+        
         if (request.enabled) {
-          buttonManager.addExtractButton();
+          uiManager.addExtractButton();
         } else {
-          buttonManager.removeExtractButton();
+          uiManager.removeExtractButton();
         }
         break;
         
       case 'getState':
         sendResponse({
           checkboxesEnabled: window.teamsExtractorSettings.showCheckboxes,
-          currentChat: TeamsDetection.getCurrentChatTitle()
+          currentChat: TeamsVariantDetector.getCurrentChatTitle()
         });
         break;
         
@@ -70,38 +89,52 @@ import { ButtonManager } from './src/modules/buttonManager.js';
         break;
         
       case 'extract':
-        buttonManager.startExtraction();
+        uiManager.startExtraction();
         break;
         
       case 'getCurrentChat':
-        const currentChat = TeamsDetection.getCurrentChatTitle();
+        const currentChat = TeamsVariantDetector.getCurrentChatTitle();
         sendResponse({chatTitle: currentChat});
+        break;
+        
+      case 'toggleAutoScroll':
+        const newAutoScrollState = !extractionEngine.getAutoScroll();
+        extractionEngine.setAutoScroll(newAutoScrollState);
+        window.teamsExtractorSettings.autoScroll = newAutoScrollState;
+        
+        // Save setting
+        storageManager.saveAutoScrollState(newAutoScrollState);
+        
+        sendResponse({autoScrollEnabled: newAutoScrollState});
         break;
     }
     sendResponse({status: 'received'});
     return true; // Keep the message channel open for async response
   });
 
-  // Load saved settings from Chrome storage
-  chrome.storage.local.get(['checkboxesEnabled', 'autoScrollEnabled'], (result) => {
-    if (result.checkboxesEnabled) {
-      window.teamsExtractorSettings.showCheckboxes = true;
-      checkboxManager.settings.showCheckboxes = true;
+  // Set up storage change listener
+  storageManager.onStorageChanged((changedSettings) => {
+    console.log('⚙️ Settings changed:', changedSettings);
+    
+    if (changedSettings.checkboxesEnabled !== undefined) {
+      window.teamsExtractorSettings.showCheckboxes = changedSettings.checkboxesEnabled;
+      checkboxManager.settings.showCheckboxes = changedSettings.checkboxesEnabled;
     }
     
-    if (result.autoScrollEnabled !== undefined) {
-      window.teamsExtractorSettings.autoScroll = result.autoScrollEnabled;
-      extractionEngine.settings.autoScroll = result.autoScrollEnabled;
-    }
-    
-    if (result.checkboxesEnabled) {
-      // Wait a bit for Teams to load, then add UI elements
-      setTimeout(() => {
-        checkboxManager.addCheckboxes();
-        buttonManager.addExtractButton();
-      }, 2000);
+    if (changedSettings.autoScrollEnabled !== undefined) {
+      window.teamsExtractorSettings.autoScroll = changedSettings.autoScrollEnabled;
+      extractionEngine.setAutoScroll(changedSettings.autoScrollEnabled);
     }
   });
+
+  // Initialize UI if checkboxes are enabled
+  if (settings.checkboxesEnabled) {
+    // Wait a bit for Teams to load, then add UI elements
+    setTimeout(() => {
+      checkboxManager.addCheckboxes();
+      uiManager.addExtractButton();
+    }, 2000);
+  }
   
   // Set up mutation observer for dynamic content
   const observer = new MutationObserver((mutations) => {
@@ -128,11 +161,11 @@ import { ButtonManager } from './src/modules/buttonManager.js';
     
     if (shouldUpdate) {
       checkboxManager.addCheckboxes();
-      buttonManager.addExtractButton();
+      uiManager.addExtractButton();
     }
   });
   
   observer.observe(document.body, { childList: true, subtree: true });
 
-  console.log('✅ Teams Chat Extractor - Modular Version Initialized');
+  console.log('✅ Teams Chat Extractor - Improved Modular Version Initialized');
 })();
