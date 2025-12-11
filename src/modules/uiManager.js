@@ -3,13 +3,12 @@
  * Handles UI creation, management, and interactions including buttons and tooltips
  */
 
-import { ScrollManager } from './scrollManager.js';
-
 export class UIManager {
-  constructor(extractionEngine, checkboxManager) {
+  constructor(extractionEngine, checkboxManager, storageManager = null) {
     this.extractionEngine = extractionEngine;
     this.checkboxManager = checkboxManager;
-    this.scrollManager = new ScrollManager();
+    this.scrollManager = extractionEngine.scrollManager;
+    this.storageManager = storageManager;
   }
 
   /**
@@ -163,6 +162,9 @@ export class UIManager {
     
     autoScrollCheckbox.addEventListener('change', () => {
       this.scrollManager.setAutoScroll(autoScrollCheckbox.checked);
+      if (this.storageManager) {
+        this.storageManager.saveAutoScrollState(autoScrollCheckbox.checked);
+      }
     });
     
     autoScrollContainer.appendChild(autoScrollCheckbox);
@@ -206,6 +208,9 @@ export class UIManager {
     
     autoScrollCheckbox.addEventListener('change', () => {
       this.scrollManager.setAutoScroll(autoScrollCheckbox.checked);
+      if (this.storageManager) {
+        this.storageManager.saveAutoScrollState(autoScrollCheckbox.checked);
+      }
     });
     
     autoScrollContainer.appendChild(autoScrollCheckbox);

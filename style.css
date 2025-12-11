@@ -40,7 +40,7 @@ body {
     display: none;
 }
 
-#download-json-button, #download-html-button, #clear-data-button {
+#download-json-button, #download-html-button, #download-csv-button, #download-txt-button, #clear-data-button {
     background-color: #5B5FC5;
     color: white;
     padding: 7px 10px;
@@ -55,7 +55,7 @@ body {
     background-color: #dc3545; /* Red background for clear button */
 }
 
-#download-json-button:hover, #download-html-button:hover {
+#download-json-button:hover, #download-html-button:hover, #download-csv-button:hover, #download-txt-button:hover {
     background-color: #4a4d9e;
 }
 
@@ -444,10 +444,99 @@ body {
     text-align: right; /* Keep this for the details text itself */
 }
 
-#upload-label:hover {
-    background-color: #4a4d9e;
+/* Reactions display */
+.message-reactions {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+    flex-wrap: wrap;
 }
 
-#file-upload {
-    display: none;
+.reaction-chip {
+    background: rgba(0, 0, 0, 0.08);
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 12px;
+    cursor: default;
+}
+
+.sent-message .reaction-chip {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Reply preview */
+.reply-preview {
+    background: rgba(0, 0, 0, 0.05);
+    border-left: 3px solid #999;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.sent-message .reply-preview {
+    background: rgba(255, 255, 255, 0.15);
+    border-left-color: rgba(255, 255, 255, 0.5);
+}
+
+.reply-author {
+    font-weight: 600;
+    font-size: 11px;
+    color: #666;
+    margin-bottom: 2px;
+}
+
+.sent-message .reply-author {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.reply-text {
+    color: #333;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.sent-message .reply-text {
+    color: rgba(255, 255, 255, 0.9);
+}
+
+/* Attachments display */
+.message-attachments {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.attachment-item {
+    font-size: 13px;
+    padding: 4px 8px;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 4px;
+}
+
+.attachment-item a {
+    color: #5B5FC5;
+    text-decoration: none;
+}
+
+.attachment-item a:hover {
+    text-decoration: underline;
+}
+
+.sent-message .attachment-item {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.sent-message .attachment-item a {
+    color: rgba(255, 255, 255, 0.95);
+}
+
+.attachment-type, .attachment-size {
+    font-size: 11px;
+    color: #888;
+}
+
+.sent-message .attachment-type, .sent-message .attachment-size {
+    color: rgba(255, 255, 255, 0.7);
 }

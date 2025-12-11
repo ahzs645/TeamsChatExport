@@ -477,7 +477,11 @@ body {
           ) {
             const messageDetails = document.createElement('div');
             messageDetails.classList.add('message-details');
-            messageDetails.textContent = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+            let detailsText = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+            if (msg.edited) {
+              detailsText += ' (edited)';
+            }
+            messageDetails.textContent = detailsText;
             messageContainer.appendChild(messageDetails);
           } else {
             messageContainer.classList.add('consecutive-message');
@@ -500,6 +504,23 @@ body {
           messageContainer.style.textAlign = 'right';
         }
 
+        // Add reply preview if present
+        if (msg.replyTo && msg.replyTo.text) {
+          const replyDiv = document.createElement('div');
+          replyDiv.className = 'reply-preview';
+          replyDiv.style.cssText = 'background: rgba(0,0,0,0.05); border-left: 3px solid #999; padding: 6px 10px; margin-bottom: 8px; border-radius: 4px; font-size: 13px;';
+          const replyAuthor = document.createElement('div');
+          replyAuthor.style.cssText = 'font-weight: 600; font-size: 11px; color: #666; margin-bottom: 2px;';
+          replyAuthor.textContent = msg.replyTo.author || 'Unknown';
+          const replyText = document.createElement('div');
+          replyText.style.cssText = 'color: #333;';
+          const truncatedText = msg.replyTo.text.length > 100 ? msg.replyTo.text.substring(0, 100) + '...' : msg.replyTo.text;
+          replyText.textContent = truncatedText;
+          replyDiv.appendChild(replyAuthor);
+          replyDiv.appendChild(replyText);
+          messageBubble.appendChild(replyDiv);
+        }
+
         const messageText = document.createElement('div');
         const messageBody = (msg.message || msg.content || '').trim();
         if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
@@ -508,6 +529,21 @@ body {
         messageText.textContent = messageBody;
 
         messageBubble.appendChild(messageText);
+
+        // Add reactions display if present
+        if (msg.reactions && msg.reactions.length > 0) {
+          const reactionsDiv = document.createElement('div');
+          reactionsDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;';
+          msg.reactions.forEach(r => {
+            const chip = document.createElement('span');
+            chip.style.cssText = 'background: rgba(0,0,0,0.08); padding: 2px 8px; border-radius: 12px; font-size: 12px;';
+            chip.textContent = (r.emoji || '') + ' ' + (r.count || 1);
+            chip.title = r.reactors ? r.reactors.join(', ') : '';
+            reactionsDiv.appendChild(chip);
+          });
+          messageBubble.appendChild(reactionsDiv);
+        }
+
         messageContainer.appendChild(messageBubble);
         messageList.appendChild(messageContainer);
 
@@ -523,7 +559,7 @@ body {
           }
         }
       });
-      
+
       messageList.scrollTop = messageList.scrollHeight;
     };
     
@@ -698,6 +734,124 @@ const escapeHtml = (text) => {
   return text.replace(/[&<>"']/g, m => map[m]);
 };
 
+/**
+ * Generates CSV export of conversations
+ */
+const generateCSVExport = (conversations) => {
+  const headers = ['conversation', 'id', 'author', 'timestamp', 'text', 'edited', 'reactions_json', 'attachments_json', 'reply_to_json'];
+  const rows = [headers.join(',')];
+
+  Object.entries(conversations).forEach(([name, messages]) => {
+    messages.forEach(msg => {
+      // Skip dividers and system messages for CSV
+      if (msg.type === 'divider' || msg.type === 'system') return;
+
+      const row = [
+        name,
+        msg.id || '',
+        msg.author || '',
+        msg.isoTimestamp || msg.timestamp || '',
+        (msg.message || msg.content || '').replace(/\n/g, '\\n').replace(/\r/g, ''),
+        msg.edited ? 'true' : 'false',
+        JSON.stringify(msg.reactions || []),
+        JSON.stringify(msg.attachments || []),
+        JSON.stringify(msg.replyTo || null)
+      ].map(field => `"${String(field).replace(/"/g, '""')}"`);
+
+      rows.push(row.join(','));
+    });
+  });
+
+  return rows.join('\n');
+};
+
+/**
+ * Generates TXT export of conversations
+ */
+const generateTXTExport = (conversations) => {
+  const lines = [];
+
+  Object.entries(conversations).forEach(([name, messages]) => {
+    lines.push(`${'='.repeat(50)}`);
+    lines.push(`${name}`);
+    lines.push(`${'='.repeat(50)}`);
+    lines.push('');
+
+    messages.forEach(msg => {
+      if (msg.type === 'divider') {
+        lines.push('');
+        lines.push(`--- ${msg.message || msg.content || ''} ---`);
+        lines.push('');
+        return;
+      }
+
+      if (msg.type === 'system') {
+        lines.push(`[SYSTEM] ${msg.message || msg.content || ''}`);
+        return;
+      }
+
+      const ts = msg.isoTimestamp || msg.timestamp || '';
+      const author = msg.author || 'Unknown';
+      const text = msg.message || msg.content || '';
+      const editedMarker = msg.edited ? ' (edited)' : '';
+
+      lines.push(`[${ts}] ${author}${editedMarker}:`);
+      lines.push(text);
+
+      // Add reactions if present
+      if (msg.reactions && msg.reactions.length > 0) {
+        const reactionStr = msg.reactions.map(r => `${r.emoji} ${r.count}`).join(' ');
+        lines.push(`  Reactions: ${reactionStr}`);
+      }
+
+      // Add reply context if present
+      if (msg.replyTo) {
+        const replyText = msg.replyTo.text?.substring(0, 50) || '';
+        lines.push(`  -> Replying to ${msg.replyTo.author}: "${replyText}..."`);
+      }
+
+      lines.push('');
+    });
+
+    lines.push('');
+    lines.push('');
+  });
+
+  return lines.join('\n');
+};
+
+/**
+ * Generates enhanced JSON export with metadata
+ */
+const generateEnhancedJSONExport = (conversations) => {
+  const messageCount = Object.values(conversations).flat().length;
+
+  return JSON.stringify({
+    meta: {
+      exportedAt: new Date().toISOString(),
+      conversationCount: Object.keys(conversations).length,
+      messageCount: messageCount,
+      version: '1.2'
+    },
+    conversations
+  }, null, 2);
+};
+
+/**
+ * Helper function to download a file
+ */
+const downloadFile = (content, filename, mimeType) => {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   const chatList = document.getElementById('chat-list');
   const chatTitle = document.getElementById('chat-title');
@@ -861,7 +1015,11 @@ document.addEventListener('DOMContentLoaded', () => {
         ) {
           const messageDetails = document.createElement('div');
           messageDetails.classList.add('message-details');
-          messageDetails.textContent = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+          let detailsText = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
+          if (msg.edited) {
+            detailsText += ' (edited)';
+          }
+          messageDetails.textContent = detailsText;
           messageContainer.appendChild(messageDetails);
         } else {
           messageContainer.classList.add('consecutive-message');
@@ -884,6 +1042,17 @@ document.addEventListener('DOMContentLoaded', () => {
         messageContainer.style.textAlign = 'right';
       }
 
+      // Add reply preview if present
+      if (msg.replyTo && msg.replyTo.text) {
+        const replyDiv = document.createElement('div');
+        replyDiv.className = 'reply-preview';
+        replyDiv.innerHTML = `
+          <div class="reply-author">${escapeHtml(msg.replyTo.author || 'Unknown')}</div>
+          <div class="reply-text">${escapeHtml(msg.replyTo.text.substring(0, 100))}${msg.replyTo.text.length > 100 ? '...' : ''}</div>
+        `;
+        messageBubble.appendChild(replyDiv);
+      }
+
       const messageText = document.createElement('div');
       const messageBody = (msg.message || msg.content || '').trim();
       if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
@@ -892,6 +1061,50 @@ document.addEventListener('DOMContentLoaded', () => {
       messageText.textContent = messageBody;
 
       messageBubble.appendChild(messageText);
+
+      // Add attachments display if present
+      if (msg.attachments && msg.attachments.length > 0) {
+        const attachmentsDiv = document.createElement('div');
+        attachmentsDiv.className = 'message-attachments';
+        msg.attachments.forEach(att => {
+          const attEl = document.createElement('div');
+          attEl.className = 'attachment-item';
+          if (att.href) {
+            attEl.innerHTML = `<a href="${escapeHtml(att.href)}" target="_blank" rel="noopener">${escapeHtml(att.label || att.text || 'Attachment')}</a>`;
+          } else {
+            attEl.textContent = att.label || att.text || 'Attachment';
+          }
+          if (att.type) {
+            const typeSpan = document.createElement('span');
+            typeSpan.className = 'attachment-type';
+            typeSpan.textContent = ` [${att.type}]`;
+            attEl.appendChild(typeSpan);
+          }
+          if (att.size) {
+            const sizeSpan = document.createElement('span');
+            sizeSpan.className = 'attachment-size';
+            sizeSpan.textContent = ` (${att.size})`;
+            attEl.appendChild(sizeSpan);
+          }
+          attachmentsDiv.appendChild(attEl);
+        });
+        messageBubble.appendChild(attachmentsDiv);
+      }
+
+      // Add reactions display if present
+      if (msg.reactions && msg.reactions.length > 0) {
+        const reactionsDiv = document.createElement('div');
+        reactionsDiv.className = 'message-reactions';
+        msg.reactions.forEach(r => {
+          const chip = document.createElement('span');
+          chip.className = 'reaction-chip';
+          chip.textContent = `${r.emoji} ${r.count}`;
+          chip.title = r.reactors?.join(', ') || '';
+          reactionsDiv.appendChild(chip);
+        });
+        messageBubble.appendChild(reactionsDiv);
+      }
+
       messageContainer.appendChild(messageBubble);
       messageList.appendChild(messageContainer);
 
@@ -1095,6 +1308,34 @@ document.addEventListener('DOMContentLoaded', () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   });
+
+  // Handle CSV download
+  const downloadCsvButton = document.getElementById('download-csv-button');
+  if (downloadCsvButton) {
+    downloadCsvButton.addEventListener('click', () => {
+      if (Object.keys(allConversations).length === 0) {
+        alert('No data to export. Please upload a JSON file or extract conversations first.');
+        return;
+      }
+      const csvContent = generateCSVExport(allConversations);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      downloadFile(csvContent, `teams-chat-export-${timestamp}.csv`, 'text/csv');
+    });
+  }
+
+  // Handle TXT download
+  const downloadTxtButton = document.getElementById('download-txt-button');
+  if (downloadTxtButton) {
+    downloadTxtButton.addEventListener('click', () => {
+      if (Object.keys(allConversations).length === 0) {
+        alert('No data to export. Please upload a JSON file or extract conversations first.');
+        return;
+      }
+      const txtContent = generateTXTExport(allConversations);
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      downloadFile(txtContent, `teams-chat-export-${timestamp}.txt`, 'text/plain');
+    });
+  }
 
   // Global search functionality
   globalSearchInput.addEventListener('input', () => {

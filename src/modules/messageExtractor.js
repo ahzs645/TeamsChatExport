@@ -73,6 +73,195 @@ export class MessageExtractor {
   }
 
   /**
+   * Extracts reactions from a message container
+   */
+  extractReactions(messageContainer) {
+    const reactions = [];
+    const pills = messageContainer.querySelectorAll('[data-tid="diverse-reaction-pill-button"]');
+
+    pills.forEach(pill => {
+      const emojiImg = pill.querySelector('[data-tid="emoticon-renderer"] img');
+      const emoji = emojiImg?.getAttribute('alt') || '';
+
+      // Parse aria-label for count
+      const label = pill.getAttribute('aria-label') || '';
+      const countMatch = label.match(/(\d+)/);
+      const count = countMatch ? parseInt(countMatch[1], 10) : 1;
+
+      // Extract reactor names
+      const reactors = this.extractReactors(pill);
+
+      if (emoji || count > 0) {
+        reactions.push({ emoji, count, reactors });
+      }
+    });
+
+    return reactions;
+  }
+
+  /**
+   * Extracts reactor names from a reaction pill
+   */
+  extractReactors(pill) {
+    const labelledBy = pill.getAttribute('aria-labelledby') || '';
+    const ids = labelledBy.split(/\s+/).filter(Boolean);
+    const names = ids.map(id => {
+      const el = document.getElementById(id);
+      return el?.innerText?.trim() || '';
+    }).filter(Boolean);
+
+    // Parse "User1, User2, and 3 others reacted" format
+    const text = names.join(' ');
+    return text.split(/react/i)[0]
+      .split(/,\s*|\s+and\s+/)
+      .map(n => n.trim())
+      .filter(n => n && !/^\d+\s+others?$/i.test(n) && !/others$/i.test(n))
+      .slice(0, 20);
+  }
+
+  /**
+   * Extracts reply/quote information from a message
+   */
+  extractReplyTo(messageContainer) {
+    // Method 1: quoted-reply-card (most common)
+    const replyCard = messageContainer.querySelector('[data-tid="quoted-reply-card"]');
+    if (replyCard) {
+      const timestampEl = replyCard.querySelector('[data-tid="quoted-reply-timestamp"]');
+      const authorEl = timestampEl?.previousElementSibling;
+      const contentEl = replyCard.querySelector('[data-tid="quoted-reply-preview-content"]');
+
+      const author = authorEl?.textContent?.trim() || '';
+      const timestamp = timestampEl?.textContent?.trim() || '';
+      const text = this.extractTextContent(contentEl) || '';
+
+      if (author || text) {
+        return { author, timestamp, text };
+      }
+    }
+
+    // Method 2: Begin Reference aria-label
+    const refGroup = messageContainer.querySelector('[role="group"][aria-label^="Begin Reference"]');
+    if (refGroup) {
+      const label = refGroup.getAttribute('aria-label') || '';
+      const match = label.match(/Begin Reference,\s*([\s\S]*),\s*([^,]+),\s*([^,]+),\s*End reference/i);
+      if (match) {
+        return { text: match[1].trim(), author: match[2].trim(), timestamp: match[3].trim() };
+      }
+    }
+
+    // Method 3: div[role="heading"] with Begin Reference pattern
+    const heading = messageContainer.querySelector('div[role="heading"]');
+    if (heading) {
+      const headingText = heading.textContent?.trim() || '';
+      const match = headingText.match(/Begin Reference,\s*(.*?)\s*by\s*(.+)$/i);
+      if (match) {
+        return { text: match[1].trim(), author: match[2].trim(), timestamp: '' };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Extracts text content from an element, handling nested elements
+   */
+  extractTextContent(element) {
+    if (!element) return '';
+
+    let text = '';
+    const walk = (node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        text += node.nodeValue;
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+
+      const tag = node.tagName;
+      if (tag === 'BR') {
+        text += '\n';
+        return;
+      }
+      if (tag === 'IMG') {
+        text += node.getAttribute('alt') || node.getAttribute('aria-label') || '';
+        return;
+      }
+
+      const blockTags = /^(DIV|P|LI|BLOCKQUOTE)$/;
+      const startLen = text.length;
+
+      for (const child of node.childNodes) {
+        walk(child);
+      }
+
+      if (blockTags.test(tag) && text.length > startLen) {
+        text += '\n';
+      }
+    };
+
+    walk(element);
+    return text.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  /**
+   * Extracts edited status from a message
+   */
+  extractEditedStatus(messageContainer) {
+    // Check for edited indicator by ID pattern
+    const editedEl = messageContainer.querySelector('[id^="edited-"]');
+    if (editedEl) {
+      const text = (editedEl.textContent || editedEl.getAttribute('title') || '').trim();
+      if (/^edited\b/i.test(text)) {
+        return { edited: true, editedTimestamp: null };
+      }
+    }
+
+    // Check aria-labelledby for edited reference
+    const labelledBy = messageContainer.getAttribute('aria-labelledby') || '';
+    const ids = labelledBy.split(/\s+/);
+    for (const id of ids) {
+      if (id.startsWith('edited-')) {
+        const el = document.getElementById(id);
+        if (el && /^edited\b/i.test(el.textContent || '')) {
+          return { edited: true, editedTimestamp: null };
+        }
+      }
+    }
+
+    // Check for nested elements with edited pattern
+    const allEdited = messageContainer.querySelectorAll('[id^="edited-"], [class*="edited"]');
+    for (const el of allEdited) {
+      const text = (el.textContent || el.getAttribute('title') || '').trim().toLowerCase();
+      if (text.includes('edited')) {
+        return { edited: true, editedTimestamp: null };
+      }
+    }
+
+    return { edited: false, editedTimestamp: null };
+  }
+
+  /**
+   * Extracts avatar URL from a message
+   */
+  extractAvatar(messageContainer) {
+    const selectors = [
+      '[data-tid="message-avatar"] img',
+      '[data-tid="avatar"] img',
+      '.fui-Avatar img',
+      '.fui-Avatar__image',
+      'img[src*="profilepicture"]',
+      'img[src*="profilepicturev2"]'
+    ];
+
+    for (const sel of selectors) {
+      const img = messageContainer.querySelector(sel);
+      if (img?.src && (img.src.includes('/profilepicture') || img.src.includes('/profilepicturev2'))) {
+        return img.src;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Extracts data from a single message container
   */
   extractMessageData(messageContainer) {
@@ -177,6 +366,18 @@ export class MessageExtractor {
     const attachmentContext = contentElement || messageContainer;
     const attachments = this.extractAttachments(attachmentContext);
 
+    // Extract reactions
+    const reactions = this.extractReactions(messageContainer);
+
+    // Extract reply/quote info
+    const replyTo = this.extractReplyTo(messageContainer);
+
+    // Extract edited status
+    const { edited, editedTimestamp } = this.extractEditedStatus(messageContainer);
+
+    // Extract avatar
+    const avatar = this.extractAvatar(messageContainer);
+
     const message = content;
 
     const isDayDivider = this.isLikelyDateDivider(message);
@@ -188,6 +389,11 @@ export class MessageExtractor {
         message,
         content: message,
         attachments,
+        reactions: [],
+        replyTo: null,
+        edited: false,
+        editedTimestamp: null,
+        avatar: null,
         type: 'divider',
         id: messageId
       };
@@ -213,6 +419,11 @@ export class MessageExtractor {
       message,
       content,
       attachments,
+      reactions,
+      replyTo,
+      edited,
+      editedTimestamp,
+      avatar,
       type: derivedType,
       id: messageId
     };
@@ -450,58 +661,152 @@ export class MessageExtractor {
   }
 
   /**
-   * Extracts attachments from a message
+   * Extracts attachments from a message with enhanced metadata
    */
   extractAttachments(contextElement) {
-    const attachments = [];
+    if (!contextElement) {
+      return [];
+    }
 
-    // Look for various attachment types
-    const attachmentSelectors = [
-      'img[src]',
-      'a[href]',
-      '[data-tid="file-attachment"]',
-      '.attachment',
-      '.file-attachment'
+    const seen = new Map();
+
+    // File attachment containers
+    const containerSelectors = [
+      '[data-tid="file-attachment-grid"]',
+      '[data-tid="file-preview-root"]',
+      '[data-tid="attachments"]'
     ];
 
-    if (!contextElement) {
-      return attachments;
+    const containers = containerSelectors
+      .map(s => contextElement.querySelector(s))
+      .filter(Boolean);
+
+    // Also check the context element itself
+    containers.push(contextElement);
+
+    containers.forEach(container => {
+      // File chiclets and attachment elements
+      container.querySelectorAll('[data-testid="file-attachment"], [data-tid^="file-chiclet-"], [data-tid="file-attachment"]').forEach(el => {
+        const title = el.getAttribute('title') || el.getAttribute('aria-label') || '';
+        const parsed = this.parseAttachmentTitle(title);
+        if (parsed) this.addAttachment(seen, parsed);
+
+        // Also check for links within the attachment
+        el.querySelectorAll('a[href^="http"]').forEach(link => {
+          this.addAttachment(seen, {
+            href: link.href,
+            label: link.textContent?.trim() || link.href,
+            type: 'link'
+          });
+        });
+      });
+
+      // Rich file preview buttons
+      container.querySelectorAll('button[data-testid="rich-file-preview-button"][title]').forEach(btn => {
+        const parsed = this.parseAttachmentTitle(btn.getAttribute('title'));
+        if (parsed) this.addAttachment(seen, parsed);
+      });
+    });
+
+    // Inline images (lazy-loaded)
+    contextElement.querySelectorAll('[data-testid="lazy-image-wrapper"] img').forEach(img => {
+      if (img.src?.startsWith('http')) {
+        this.addAttachment(seen, {
+          href: img.src,
+          label: img.alt || 'image',
+          type: 'IMAGE'
+        });
+      }
+    });
+
+    // Regular images (excluding avatars)
+    contextElement.querySelectorAll('img[src^="http"]').forEach(img => {
+      if (img.closest('[data-tid="message-avatar"]') || img.closest('.fui-Avatar')) return;
+      if (img.classList.contains('fui-Avatar__image')) return;
+      if (img.src.includes('/profilepicture')) return;
+
+      // Skip emoticons
+      if (img.closest('[data-tid="emoticon-renderer"]')) return;
+
+      this.addAttachment(seen, {
+        href: img.src,
+        label: img.alt || 'Image',
+        type: 'IMAGE'
+      });
+    });
+
+    // Safe links and regular links
+    contextElement.querySelectorAll('a[data-testid="atp-safelink"], a[href^="http"]').forEach(link => {
+      // Skip avatar links
+      if (link.closest('[data-tid="message-avatar"]')) return;
+      if (link.closest('.fui-Avatar')) return;
+
+      // Skip javascript and hash links
+      if (!link.href || link.href.startsWith('javascript:') || link.href === '#') return;
+
+      this.addAttachment(seen, {
+        href: link.href,
+        label: link.textContent?.trim() || link.href,
+        type: 'link'
+      });
+    });
+
+    return Array.from(seen.values());
+  }
+
+  /**
+   * Parses attachment metadata from title/aria-label attributes
+   */
+  parseAttachmentTitle(title) {
+    if (!title) return null;
+
+    const lines = title.split(/\n+/).map(l => l.trim()).filter(Boolean);
+    const hrefMatch = title.match(/https?:\/\/\S+/);
+
+    const attachment = {
+      label: lines[0] || '',
+      href: hrefMatch?.[0] || '',
+      metaText: lines.slice(1).join(' • ')
+    };
+
+    // Extract file type from extension
+    const extMatch = attachment.label.match(/\.([A-Za-z0-9]{1,6})$/);
+    if (extMatch) {
+      attachment.type = extMatch[1].toUpperCase();
     }
 
-    for (const selector of attachmentSelectors) {
-      const elements = contextElement.querySelectorAll(selector);
-      elements.forEach(element => {
-        if (element.closest('[data-tid="message-avatar"]') || element.closest('.fui-Avatar')) {
-          return;
-        }
-        if (element.tagName === 'IMG') {
-          if (element.classList.contains('fui-Avatar__image')) {
-            return;
-          }
-          attachments.push({
-            type: 'image',
-            src: element.src,
-            alt: element.alt || 'Image'
-          });
-        } else if (element.tagName === 'A') {
-          if (!element.href || element.href.startsWith('javascript:') || element.href === '#') {
-            return;
-          }
-          attachments.push({
-            type: 'link',
-            href: element.href,
-            text: element.textContent?.trim() || 'Link'
-          });
-        } else {
-          attachments.push({
-            type: 'file',
-            text: element.textContent?.trim() || 'File attachment'
-          });
-        }
-      });
+    // Extract size from metadata
+    const sizeMatch = attachment.metaText.match(/\b\d+(?:[.,]\d+)?\s*(?:bytes?|KB|MB|GB|TB)\b/i);
+    if (sizeMatch) {
+      attachment.size = sizeMatch[0].replace(',', '.').trim();
     }
-    
-    return attachments;
+
+    // Extract owner from metadata
+    const ownerMatch = attachment.metaText.match(/(?:Shared by|Uploaded by|Sent by|From|Owner)\s*:?\s*([^•,]+)/i);
+    if (ownerMatch) {
+      attachment.owner = ownerMatch[1].trim();
+    }
+
+    return attachment;
+  }
+
+  /**
+   * Adds an attachment to the seen map, merging duplicates
+   */
+  addAttachment(seen, attachment) {
+    const key = `${attachment.href || ''}@@${attachment.label || ''}`;
+    const existing = seen.get(key);
+
+    if (existing) {
+      // Merge metadata, preferring existing values
+      if (!existing.type && attachment.type) existing.type = attachment.type;
+      if (!existing.size && attachment.size) existing.size = attachment.size;
+      if (!existing.owner && attachment.owner) existing.owner = attachment.owner;
+      if (!existing.metaText && attachment.metaText) existing.metaText = attachment.metaText;
+      if (!existing.href && attachment.href) existing.href = attachment.href;
+    } else {
+      seen.set(key, attachment);
+    }
   }
 
   extractFromHTML(htmlString) {
