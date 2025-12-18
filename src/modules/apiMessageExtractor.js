@@ -335,16 +335,29 @@ export class ApiMessageExtractor {
 
   toStandardMessage(msg) {
     if (!msg) return null;
+
+    // Debug: log first message to see structure
+    if (!this._debugLogged) {
+      console.log('[Teams API] Sample message structure:', JSON.stringify(msg, null, 2).substring(0, 2000));
+      this._debugLogged = true;
+    }
+
     const id = msg.id || msg.messageId || msg.clientmessageid || msg.clientMessageId || msg.activityId;
 
+    // Teams API uses lowercase property names
     const author =
+      msg.imdisplayname ||
+      msg.imDisplayName ||
+      msg.displayName ||
+      msg.displayname ||
       msg.from?.user?.displayName ||
-      msg.from?.user?.id ||
       msg.from?.displayName ||
       msg.from?.name ||
-      msg.imDisplayName ||
+      msg.properties?.displayName ||
+      msg.properties?.displayname ||
       msg.sender ||
       msg.creator?.displayName ||
+      msg.from?.user?.id ||
       'Unknown';
 
     const tsRaw =
