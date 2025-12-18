@@ -113,26 +113,79 @@ export class ApiMessageExtractor {
     const baseUrl = new URL(initialUrl);
     let nextSyncState = baseUrl.searchParams.get('syncState') || null;
 
-    // Get token
-    let token = window.__teamsAuthToken || window.localStorage.getItem('teamsChatAuthToken');
+    // Get token - try multiple sources
+    console.log('[Teams Chat API] Looking for auth token...');
 
-    // Wait for token if missing (race condition fix)
+    let token = null;
+
+    // === FIRST: Try context bridge (most reliable) ===
+    const bridge = document.getElementById('teams-extractor-context-bridge');
+    if (bridge) {
+      const bridgeToken = bridge.getAttribute('data-token');
+      if (bridgeToken) {
+        token = bridgeToken;
+        console.log('[Teams Chat API] ✅ Found token in context bridge, length:', token.length);
+      }
+    }
+
+    // Try direct localStorage
     if (!token) {
-      // Try to find it in MSAL storage first (Direct Scan)
-      token = this.findTokenInStorage();
+      try {
+        token = localStorage.getItem('teamsChatAuthToken');
+        if (token) {
+          console.log('[Teams Chat API] ✅ Found token in localStorage.teamsChatAuthToken');
+        }
+      } catch (e) {
+        console.log('[Teams Chat API] localStorage access error:', e.message);
+      }
+    }
 
-      if (!token) {
-        console.log('[Teams Chat API] Token missing, waiting for capture...');
-        for (let i = 0; i < 10; i++) { // Wait up to 2 seconds
-          await new Promise(r => setTimeout(r, 200));
-          token = window.__teamsAuthToken || window.localStorage.getItem('teamsChatAuthToken') || this.findTokenInStorage();
-          if (token) break;
+    // Try window.__teamsAuthToken (only works if we're in page context)
+    if (!token && typeof window !== 'undefined' && window.__teamsAuthToken) {
+      token = window.__teamsAuthToken;
+      console.log('[Teams Chat API] ✅ Found token in window.__teamsAuthToken');
+    }
+
+    // Try MSAL storage scan
+    if (!token) {
+      console.log('[Teams Chat API] Scanning MSAL storage for token...');
+      token = this.findTokenInStorage();
+      if (token) {
+        console.log('[Teams Chat API] ✅ Found token in MSAL storage');
+      }
+    }
+
+    // Wait and retry if still missing
+    if (!token) {
+      console.log('[Teams Chat API] Token not found, waiting for capture...');
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 200));
+        // Check bridge again
+        const bridgeRetry = document.getElementById('teams-extractor-context-bridge');
+        if (bridgeRetry) {
+          token = bridgeRetry.getAttribute('data-token');
+          if (token) {
+            console.log('[Teams Chat API] ✅ Found token in bridge after waiting');
+            break;
+          }
+        }
+        try {
+          token = localStorage.getItem('teamsChatAuthToken');
+        } catch (e) {}
+        if (!token) token = this.findTokenInStorage();
+        if (token) {
+          console.log('[Teams Chat API] ✅ Found token after waiting');
+          break;
         }
       }
     }
 
     if (!token) {
-      console.warn('[Teams Chat API] No auth token found after waiting. API fetch will likely fail (401).');
+      console.warn('[Teams Chat API] ❌ No auth token found after all attempts. API fetch will fail.');
+      console.log('[Teams Chat API] Debug: Check if contextBridge.js and chatFetchOverride.js are loaded.');
+      console.log('[Teams Chat API] Debug: Bridge element exists:', !!document.getElementById('teams-extractor-context-bridge'));
+    } else {
+      console.log('[Teams Chat API] Token found, length:', token.length);
     }
 
     if (token) {
@@ -171,23 +224,18 @@ export class ApiMessageExtractor {
       }
     }
 
+    let currentUrl = baseUrl.toString();
+
     for (let i = 0; i < maxPages; i++) {
       try {
-        const urlObj = new URL(baseUrl.toString());
-        if (nextSyncState) {
-          urlObj.searchParams.set('syncState', nextSyncState);
-        } else {
-          urlObj.searchParams.delete('syncState');
-        }
-
-        const resp = await fetch(urlObj.toString(), {
+        console.log(`[Teams Chat API] Fetching page ${i + 1}...`);
+        const resp = await fetch(currentUrl, {
           credentials: 'include',
           headers
         });
 
         if (resp.status === 401) {
           console.error('[Teams Chat API] 401 Unauthorized. Token was:', token ? 'Present' : 'Missing');
-          // If 401, maybe clear the token so we try to capture a new one?
           try { window.localStorage.removeItem('teamsChatAuthToken'); } catch (e) { }
         }
 
@@ -196,16 +244,18 @@ export class ApiMessageExtractor {
         const payloadMessages = this.extractFromPayload(data);
         payloadMessages.forEach((msg) => messages.push(msg));
 
-        // Prefer syncState on root; fallback to _metadata.syncState
-        nextSyncState = data?.syncState || data?._metadata?.syncState || null;
-        const pageCount = Array.isArray(data?.messages) ? data.messages.length : 0;
+        // syncState from Teams IS the next URL to fetch directly
+        const nextUrl = data?.syncState || data?._metadata?.syncState || null;
 
-        // Continue paging if we still have a syncState, even when pageCount is 0
-        if (!nextSyncState) {
+        if (!nextUrl) {
+          console.log(`[Teams Chat API] No more pages (no syncState returned)`);
           break;
         }
+
+        // Use syncState as the next URL directly
+        currentUrl = nextUrl;
       } catch (err) {
-        console.warn('[Teams Chat API capture] fetch error', baseUrl.toString(), err);
+        console.warn('[Teams Chat API capture] fetch error', currentUrl, err);
         break;
       }
     }

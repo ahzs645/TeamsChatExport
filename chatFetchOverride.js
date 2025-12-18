@@ -82,7 +82,27 @@
     logDebug('captured', url);
   };
 
-  console.log('[Teams Chat Extractor] Override v3 loaded');
+  console.log('[Teams Chat Extractor] Override v4 loaded');
+
+  // Set flags so content script and diagnostics know we're running
+  window.__teamsChatOverrideInjected = true;
+  window.__teamsChatOverrideInjectedEarly = true;
+
+  // Track current conversation ID from API calls
+  window.__teamsCurrentConversationId = null;
+
+  const captureConversationId = (url) => {
+    if (!url) return;
+    // Look for conversation/thread ID patterns in the URL
+    const match = url.match(/(?:conversations|threads)\/(19:[^/?#&]+)/);
+    if (match && match[1].length > 25) {
+      const convId = decodeURIComponent(match[1]);
+      if (convId !== window.__teamsCurrentConversationId) {
+        window.__teamsCurrentConversationId = convId;
+        console.log('[Teams Chat Extractor] 📍 Captured conversation ID:', convId.substring(0, 50) + '...');
+      }
+    }
+  };
 
   // Clear potentially bad token on startup
   try {
@@ -174,6 +194,9 @@
       captureToken(config.headers, url);
     }
 
+    // Capture conversation ID from conversation/message API calls
+    captureConversationId(url);
+
     const response = await originalFetch(...args);
 
     if (isCandidateUrl(url)) {
@@ -245,6 +268,8 @@
     window.XMLHttpRequest.prototype.open = function (...openArgs) {
       try {
         this.__teamsChatApiUrl = openArgs[1];
+        // Capture conversation ID from XHR URLs
+        captureConversationId(openArgs[1]);
       } catch (_err) {
         // ignore
       }
