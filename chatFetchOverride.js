@@ -1,4 +1,5 @@
 (() => {
+  try {
   const { fetch: originalFetch } = window;
   const cacheKey = '__teamsExtractorMessageApiCache';
   const hiddenDivId = 'teams-extractor-message-api-cache';
@@ -27,6 +28,9 @@
     const existing = document.getElementById(hiddenDivId);
     if (existing) {
       return existing;
+    }
+    if (!document.body) {
+      return null; // Body not ready yet
     }
     const div = document.createElement('div');
     div.id = hiddenDivId;
@@ -61,13 +65,8 @@
       cache.splice(0, cache.length - MAX_CACHE_ENTRIES);
     }
 
-    // Keep a copy in a hidden div for the content script context
-    try {
-      const div = ensureHiddenDiv();
-      div.textContent = JSON.stringify(cache);
-    } catch (err) {
-      console.warn('[Teams Chat API capture] Failed to serialize cache', err);
-    }
+    // Don't serialize to DOM on every push - too expensive for large payloads
+    // The content script can access window[cacheKey] directly via the bridge
   };
 
   const logDebug = (msg, ...rest) => {
@@ -78,6 +77,10 @@
   };
 
   const capturePayload = (url, payload) => {
+    // Only capture if extraction is active (set by content script)
+    if (!window.__teamsExtractorActive) {
+      return; // Skip capture when not extracting
+    }
     pushEntry(url, payload);
     logDebug('captured', url);
   };
@@ -197,67 +200,12 @@
     // Capture conversation ID from conversation/message API calls
     captureConversationId(url);
 
-    const response = await originalFetch(...args);
-
-    if (isCandidateUrl(url)) {
-      const clone = response.clone();
-      clone
-        .json()
-        .then((data) => capturePayload(url, data))
-        .catch((err) => logDebug('non-JSON or parse failed for fetch', url, err));
-    }
-
-    return response;
+    // Just return the response - don't clone or parse (causes lag on large chats)
+    return originalFetch(...args);
   };
 
-  // Hook Response.json so we capture even if the page grabbed fetch before our override
-  if (window.Response && typeof window.Response.prototype.json === 'function') {
-    const originalJson = window.Response.prototype.json;
-    window.Response.prototype.json = function (...jsonArgs) {
-      try {
-        const url = this.url || '';
-        if (isCandidateUrl(url)) {
-          this.clone()
-            .json()
-            .then((data) => capturePayload(url, data))
-            .catch((_err) => {
-              // ignore clone parse errors
-            });
-        }
-      } catch (_err) {
-        // ignore
-      }
-      return originalJson.apply(this, jsonArgs);
-    };
-  }
-
-  // Hook Response.text as a fallback
-  if (window.Response && typeof window.Response.prototype.text === 'function') {
-    const originalText = window.Response.prototype.text;
-    window.Response.prototype.text = function (...textArgs) {
-      try {
-        const url = this.url || '';
-        if (isCandidateUrl(url)) {
-          this.clone()
-            .text()
-            .then((body) => {
-              try {
-                const parsed = JSON.parse(body);
-                capturePayload(url, parsed);
-              } catch (_err) {
-                // not JSON
-              }
-            })
-            .catch((_err) => {
-              // ignore
-            });
-        }
-      } catch (_err) {
-        // ignore
-      }
-      return originalText.apply(this, textArgs);
-    };
-  }
+  // Response.json and Response.text hooks removed - they caused lag on large chats
+  // Token and conversation ID capture via fetch headers is sufficient
 
   // Hook XMLHttpRequest as well (some Teams variants use XHR)
   if (window.XMLHttpRequest) {
@@ -306,24 +254,10 @@
       return originalSetRequestHeader.apply(this, arguments);
     };
 
-    window.XMLHttpRequest.prototype.send = function (...sendArgs) {
-      if (this.__teamsChatApiUrl) {
-        this.addEventListener('loadend', () => {
-          const finalUrl = this.responseURL || this.__teamsChatApiUrl;
-          if (!isCandidateUrl(finalUrl)) return;
-
-          if (this.responseType === '' || this.responseType === 'text' || this.responseType === 'json') {
-            const body = this.response || this.responseText;
-            try {
-              const parsed = typeof body === 'string' ? JSON.parse(body) : body;
-              capturePayload(finalUrl, parsed);
-            } catch (_err) {
-              // not JSON, ignore
-            }
-          }
-        });
-      }
-      return originalSend.apply(this, sendArgs);
-    };
+    // XHR send hook removed - response capture caused lag
+    // Token capture via setRequestHeader is sufficient
+  }
+  } catch (err) {
+    console.error('[Teams Chat Extractor] FATAL ERROR in fetch override:', err);
   }
 })();

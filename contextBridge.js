@@ -4,11 +4,17 @@
  * via DOM elements that both contexts can access.
  */
 (() => {
+  try {
   const BRIDGE_DIV_ID = 'teams-extractor-context-bridge';
 
   const createBridgeElement = () => {
     let bridge = document.getElementById(BRIDGE_DIV_ID);
     if (!bridge) {
+      // Wait for body to exist
+      if (!document.body) {
+        console.warn('[Context Bridge] document.body not ready');
+        return null;
+      }
       bridge = document.createElement('div');
       bridge.id = BRIDGE_DIV_ID;
       bridge.style.display = 'none';
@@ -107,7 +113,6 @@
 
       // Check for EXACT match (first line equals chat name)
       if (normalizedFirstLine === normalizedChatName || firstLine === chatName) {
-        console.log('[Context Bridge] EXACT match found:', firstLine);
         if (isOneOnOne) {
           // Exact match + 1-on-1 = perfect, return immediately
           return conversationId;
@@ -119,7 +124,6 @@
       // Check if first line STARTS with the chat name (handles "Name, Person [NH]" format)
       if (normalizedFirstLine.startsWith(normalizedChatName) || normalizedChatName.startsWith(normalizedFirstLine)) {
         if (isOneOnOne && !oneOnOneMatch) {
-          console.log('[Context Bridge] 1-on-1 partial match:', firstLine);
           oneOnOneMatch = conversationId;
         } else if (!partialMatch) {
           partialMatch = conversationId;
@@ -128,18 +132,9 @@
     }
 
     // Return in priority order: exact > 1-on-1 > partial
-    if (exactMatch) {
-      console.log('[Context Bridge] Using exact match');
-      return exactMatch;
-    }
-    if (oneOnOneMatch) {
-      console.log('[Context Bridge] Using 1-on-1 match');
-      return oneOnOneMatch;
-    }
-    if (partialMatch) {
-      console.log('[Context Bridge] Using partial match (group chat)');
-      return partialMatch;
-    }
+    if (exactMatch) return exactMatch;
+    if (oneOnOneMatch) return oneOnOneMatch;
+    if (partialMatch) return partialMatch;
 
     return null;
   };
@@ -203,10 +198,13 @@
   };
 
   const updateBridge = () => {
-    const bridge = createBridgeElement();
-    const activeChatName = getActiveChatName();
-    const conversationId = findConversationId();
-    const token = findToken();
+    try {
+      const bridge = createBridgeElement();
+      if (!bridge) return null; // Body not ready yet
+
+      const activeChatName = getActiveChatName();
+      const conversationId = findConversationId();
+      const token = findToken();
 
     const data = {
       token,
@@ -220,26 +218,42 @@
     bridge.setAttribute('data-active-chat-name', data.activeChatName || '');
     bridge.setAttribute('data-timestamp', data.timestamp.toString());
 
-    console.log('[Context Bridge] Updated:', {
-      hasToken: !!data.token,
-      tokenLength: data.token?.length || 0,
-      activeChatName: data.activeChatName || 'NOT FOUND',
-      conversationId: data.conversationId ? data.conversationId.substring(0, 40) + '...' : 'NOT FOUND'
-    });
+    // Only log if something changed (reduce console spam)
+    if (window.__lastBridgeChat !== data.activeChatName) {
+      console.log('[Context Bridge] Chat changed:', data.activeChatName || 'NOT FOUND');
+      window.__lastBridgeChat = data.activeChatName;
+    }
 
     return data;
+    } catch (err) {
+      console.error('[Context Bridge] Error in updateBridge:', err);
+      return null;
+    }
   };
 
-  // Update immediately
+  // Debounce helper to prevent excessive updates
+  let updateTimeout = null;
+  const debouncedUpdate = (delay = 500) => {
+    if (updateTimeout) clearTimeout(updateTimeout);
+    updateTimeout = setTimeout(updateBridge, delay);
+  };
+
+  // Update immediately on load
   updateBridge();
 
-  // Update periodically and on visibility change
-  setInterval(updateBridge, 2000);
-  document.addEventListener('visibilitychange', updateBridge);
+  // Update periodically (reduced frequency to prevent performance issues)
+  setInterval(updateBridge, 5000);
 
-  // Update on click (chat selection)
+  // Update on visibility change
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      debouncedUpdate(300);
+    }
+  });
+
+  // Update on click (chat selection) - debounced to prevent rapid-fire updates
   document.addEventListener('click', () => {
-    setTimeout(updateBridge, 500);
+    debouncedUpdate(600);
   }, true);
 
   // Expose manual update function
@@ -252,4 +266,7 @@
   });
 
   console.log('[Context Bridge] Initialized - bridge element created');
+  } catch (err) {
+    console.error('[Context Bridge] FATAL ERROR:', err);
+  }
 })();
