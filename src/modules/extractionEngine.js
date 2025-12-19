@@ -111,36 +111,199 @@ export class ExtractionEngine {
 
     console.log(`Active chat: ${activeChatName}`);
 
-    if (!conversationId) {
-      console.error("Could not find conversation ID for this chat.");
-      console.log("Try clicking on a different chat first, then come back.");
-      return null;
+    let apiMessages = [];
+
+    // Try API extraction first (works for v1)
+    if (conversationId && token) {
+      console.log(`Conversation ID: ${conversationId.substring(0, 50)}...`);
+      console.log(`Token available (${token.length} chars)`);
+      console.log("Trying API extraction...");
+      apiMessages = await this.apiMessageExtractor.fetchConversation(conversationId);
     }
 
-    console.log(`Conversation ID: ${conversationId.substring(0, 50)}...`);
+    // If API fails or returns nothing, try DOM extraction (works for v2)
+    if (apiMessages.length === 0) {
+      console.log("API returned no messages, trying DOM extraction (Teams v2 mode)...");
 
-    if (!token) {
-      console.error("No auth token available. Please refresh the page and try again.");
-      return null;
+      // Scroll to load more messages first
+      await this.scrollToLoadMessages();
+
+      apiMessages = this.extractMessagesFromDOM();
+
+      if (apiMessages.length > 0) {
+        console.log(`Extracted ${apiMessages.length} messages via DOM`);
+      }
     }
-
-    console.log(`Token available (${token.length} chars)`);
-
-    console.log("Fetching messages via API...");
-    const apiMessages = await this.apiMessageExtractor.fetchConversation(conversationId);
 
     if (apiMessages.length === 0) {
-      console.error("No messages found via API.");
+      console.error("No messages found via API or DOM.");
       return null;
     }
 
     const preparedMessages = this.prepareMessages(this.mergeMessages(apiMessages));
-    console.log(`Extracted ${preparedMessages.length} messages via API`);
+    console.log(`Prepared ${preparedMessages.length} messages`);
 
     console.log("Embedding avatars...");
     const messagesWithAvatars = await this.embedAvatars(preparedMessages);
 
     return { [activeChatName]: messagesWithAvatars };
+  }
+
+  /**
+   * Scroll up in the chat to load more messages (for DOM extraction)
+   */
+  async scrollToLoadMessages() {
+    const messageList = document.querySelector('[data-tid="message-pane-list-container"]') ||
+                       document.querySelector('[role="main"] [data-virtualized]') ||
+                       document.querySelector('#message-list');
+
+    if (!messageList) {
+      console.log("Could not find message container for scrolling");
+      return;
+    }
+
+    console.log("Scrolling to load more messages...");
+    const scrollAttempts = 10;
+
+    for (let i = 0; i < scrollAttempts; i++) {
+      messageList.scrollTop = 0;
+      await this.delay(300);
+
+      // Check if we've loaded more
+      const currentCount = document.querySelectorAll('[data-tid="chat-pane-message"]').length;
+      console.log(`Scroll ${i + 1}/${scrollAttempts}: ${currentCount} messages loaded`);
+    }
+  }
+
+  /**
+   * Extract messages directly from DOM (Teams v2 fallback)
+   */
+  extractMessagesFromDOM() {
+    const messageElements = document.querySelectorAll('[data-tid="chat-pane-message"]');
+    console.log(`Found ${messageElements.length} message elements in DOM`);
+
+    const messages = [];
+
+    messageElements.forEach((msg, index) => {
+      try {
+        const mid = msg.getAttribute('data-mid');
+
+        // Try multiple methods to find author
+        let author = 'Unknown';
+        const authorEl = document.getElementById('author-' + mid) ||
+                        msg.querySelector('[id*="author"]') ||
+                        msg.querySelector('[data-tid*="author"]') ||
+                        msg.querySelector('[class*="author"]') ||
+                        msg.querySelector('[class*="sender"]');
+        if (authorEl) {
+          author = authorEl.textContent?.trim() || 'Unknown';
+        }
+
+        // Try multiple methods to find timestamp
+        let timestamp = '';
+        const timestampEl = document.getElementById('timestamp-' + mid) ||
+                          msg.querySelector('[id*="timestamp"]') ||
+                          msg.querySelector('time') ||
+                          msg.querySelector('[data-tid*="time"]') ||
+                          msg.querySelector('[class*="timestamp"]');
+        if (timestampEl) {
+          timestamp = timestampEl.getAttribute('datetime') || timestampEl.textContent?.trim() || '';
+        }
+
+        // Try multiple methods to find content
+        let content = '';
+        const contentEl = document.getElementById('content-' + mid) ||
+                         msg.querySelector('[id*="content"]') ||
+                         msg.querySelector('[data-tid*="message-text"]') ||
+                         msg.querySelector('[class*="message-body"]') ||
+                         msg.querySelector('[class*="text-content"]') ||
+                         msg.querySelector('div[dir="auto"]');
+        if (contentEl) {
+          content = contentEl.textContent?.trim() || '';
+        }
+
+        // Extract attachments
+        const attachments = [];
+        const attachmentEls = msg.querySelectorAll('[id*="attachment"], [data-tid*="attachment"], [class*="attachment"]');
+        attachmentEls.forEach(att => {
+          const link = att.querySelector('a');
+          attachments.push({
+            type: 'attachment',
+            name: att.textContent?.trim() || 'Attachment',
+            href: link?.href || ''
+          });
+        });
+
+        // Extract images
+        const embeddedImages = [];
+        const imgEls = msg.querySelectorAll('img:not([class*="emoji"]):not([class*="avatar"])');
+        imgEls.forEach(img => {
+          if (img.src && !img.src.includes('emoji') && !img.src.includes('avatar')) {
+            embeddedImages.push({
+              src: img.src,
+              alt: img.alt || '',
+              isEmoji: false
+            });
+          }
+        });
+
+        // Only add if there's content
+        if (content || attachments.length > 0 || embeddedImages.length > 0) {
+          messages.push({
+            id: mid || `dom-${index}`,
+            author,
+            timestamp,
+            isoTimestamp: this.parseTimestamp(timestamp),
+            message: content,
+            content,
+            attachments,
+            embeddedImages,
+            reactions: [], // Could extract reactions too if needed
+            type: null
+          });
+        }
+      } catch (err) {
+        console.warn('Error extracting message:', err);
+      }
+    });
+
+    return messages;
+  }
+
+  /**
+   * Parse various timestamp formats to ISO
+   */
+  parseTimestamp(timestamp) {
+    if (!timestamp) return null;
+
+    try {
+      // Try direct parse first
+      const date = new Date(timestamp);
+      if (!isNaN(date.getTime())) {
+        return date.toISOString();
+      }
+
+      // Handle "12/8 3:41 PM" format
+      const match = timestamp.match(/(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      if (match) {
+        const month = parseInt(match[1]) - 1;
+        const day = parseInt(match[2]);
+        let hours = parseInt(match[3]);
+        const minutes = parseInt(match[4]);
+        const ampm = match[5];
+
+        if (ampm?.toUpperCase() === 'PM' && hours < 12) hours += 12;
+        if (ampm?.toUpperCase() === 'AM' && hours === 12) hours = 0;
+
+        const now = new Date();
+        const date = new Date(now.getFullYear(), month, day, hours, minutes);
+        return date.toISOString();
+      }
+    } catch (e) {
+      // Ignore parse errors
+    }
+
+    return null;
   }
 
   /**

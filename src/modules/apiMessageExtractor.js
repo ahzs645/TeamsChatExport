@@ -24,14 +24,37 @@ export class ApiMessageExtractor {
   }
 
   getHostAndRegion() {
-    const defaults = { host: 'teams.microsoft.com', region: 'ca' };
+    const defaults = { host: 'teams.microsoft.com', region: 'amer' };
     try {
       const host = localStorage.getItem('teamsChatHostOverride') || defaults.host;
-      const region = localStorage.getItem('teamsChatRegionOverride') || defaults.region;
-      return { host, region };
+      // Try to detect region from recent API calls
+      let region = localStorage.getItem('teamsChatRegionOverride');
+      if (!region) {
+        const perfEntries = performance?.getEntriesByType?.('resource') || [];
+        for (let i = perfEntries.length - 1; i >= 0; i--) {
+          const name = perfEntries[i].name || '';
+          // Check for /api/mt/{region}/ pattern (v2)
+          const mtMatch = name.match(/\/api\/mt\/([a-z]+)\//);
+          if (mtMatch) {
+            region = mtMatch[1];
+            break;
+          }
+          // Check for /chatsvc/{region}/ pattern (v1)
+          const chatsvcMatch = name.match(/\/chatsvc\/([a-z]+)\//);
+          if (chatsvcMatch) {
+            region = chatsvcMatch[1];
+            break;
+          }
+        }
+      }
+      return { host, region: region || defaults.region };
     } catch (_err) {
       return defaults;
     }
+  }
+
+  isTeamsV2() {
+    return window.location.href.includes('/v2/');
   }
 
   isEnabled() {
@@ -90,21 +113,41 @@ export class ApiMessageExtractor {
     const effectiveStartTime = this.readNumberSetting('teamsChatApiStartTime', { min: 1, max: Number.MAX_SAFE_INTEGER, fallback: startTime });
 
     const { host, region } = this.getHostAndRegion();
-    const base = `https://${host}/api/chatsvc/${region}/v1`;
-    // Try conversations endpoint first, then threads endpoint as fallback.
     const encodedId = encodeURIComponent(conversationId);
-    const paths = [
-      `${base}/users/ME/conversations/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`,
-      `${base}/threads/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`
-    ];
+    const isV2 = this.isTeamsV2();
+
+    console.log(`[Teams Chat API] Detected Teams ${isV2 ? 'v2' : 'v1'}, region: ${region}`);
+
+    // Build list of API endpoints to try
+    const paths = [];
+
+    if (isV2) {
+      // Teams v2 API endpoints
+      const v2Base = `https://${host}/api/mt/${region}/beta`;
+      paths.push(
+        `${v2Base}/users/ME/chats/${encodedId}/messages?$top=${effectivePageSize}`,
+        `${v2Base}/chats/${encodedId}/messages?$top=${effectivePageSize}`,
+        `${v2Base}/me/chats/${encodedId}/messages?$top=${effectivePageSize}`
+      );
+    }
+
+    // Always try v1 endpoints as fallback (they might still work)
+    const v1Base = `https://${host}/api/chatsvc/${region}/v1`;
+    paths.push(
+      `${v1Base}/users/ME/conversations/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`,
+      `${v1Base}/threads/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`
+    );
 
     for (const path of paths) {
+      console.log(`[Teams Chat API] Trying: ${path.substring(0, 80)}...`);
       const msgs = await this.fetchPaged(path, { maxPages: effectiveMaxPages });
       if (msgs.length > 0) {
+        console.log(`[Teams Chat API] Success with endpoint, got ${msgs.length} messages`);
         return msgs;
       }
     }
 
+    console.log('[Teams Chat API] All endpoints failed');
     return [];
   }
 
@@ -244,15 +287,19 @@ export class ApiMessageExtractor {
         const payloadMessages = this.extractFromPayload(data);
         payloadMessages.forEach((msg) => messages.push(msg));
 
-        // syncState from Teams IS the next URL to fetch directly
-        const nextUrl = data?.syncState || data?._metadata?.syncState || null;
+        // Get next page URL - v1 uses syncState, v2 uses @odata.nextLink
+        const nextUrl = data?.syncState ||
+                       data?._metadata?.syncState ||
+                       data?.['@odata.nextLink'] ||
+                       data?.nextLink ||
+                       null;
 
         if (!nextUrl) {
-          console.log(`[Teams Chat API] No more pages (no syncState returned)`);
+          console.log(`[Teams Chat API] No more pages`);
           break;
         }
 
-        // Use syncState as the next URL directly
+        // Use next URL directly
         currentUrl = nextUrl;
       } catch (err) {
         console.warn('[Teams Chat API capture] fetch error', currentUrl, err);
@@ -317,11 +364,15 @@ export class ApiMessageExtractor {
   extractFromPayload(payload) {
     const buckets = [];
 
+    // v1 format
     if (Array.isArray(payload)) buckets.push(payload);
     if (Array.isArray(payload?.messages)) buckets.push(payload.messages);
-    if (Array.isArray(payload?.value)) buckets.push(payload.value);
     if (Array.isArray(payload?.results)) buckets.push(payload.results);
 
+    // v2 format (OData style)
+    if (Array.isArray(payload?.value)) buckets.push(payload.value);
+
+    // Graph API / v2 nested format
     if (Array.isArray(payload?.conversations)) {
       payload.conversations.forEach((conv) => {
         if (Array.isArray(conv?.messages)) buckets.push(conv.messages);
@@ -329,20 +380,34 @@ export class ApiMessageExtractor {
       });
     }
 
+    // v2 chat messages might be directly in payload
+    if (payload?.body?.content && payload?.from) {
+      // Single message object
+      buckets.push([payload]);
+    }
+
     const flattened = buckets.flat().filter(Boolean);
+    console.log(`[Teams Chat API] Extracted ${flattened.length} raw messages from payload`);
     return flattened.map((msg) => this.toStandardMessage(msg)).filter(Boolean);
   }
 
   toStandardMessage(msg) {
     if (!msg) return null;
 
-    // Debug: log first message to see structure
-    if (!this._debugLogged) {
-      console.log('[Teams API] Sample message structure:', JSON.stringify(msg, null, 2).substring(0, 2000));
-      this._debugLogged = true;
+    const id = msg.id || msg.messageId || msg.clientmessageid || msg.clientMessageId || msg.activityId;
+    const messageType = (msg.messagetype || msg.messageType || msg.type || '').toLowerCase();
+
+    // Filter out system/event messages that aren't useful
+    const skipTypes = ['event/call', 'threadactivity', 'rlc:', 'event/', 'control/'];
+    if (skipTypes.some(t => messageType.includes(t))) {
+      return null;
     }
 
-    const id = msg.id || msg.messageId || msg.clientmessageid || msg.clientMessageId || msg.activityId;
+    // Check for call/meeting system messages by content pattern
+    const bodyContent = msg.body?.content || msg.content || msg.message || '';
+    if (this.isSystemCallMessage(bodyContent)) {
+      return this.parseCallMessage(msg, bodyContent);
+    }
 
     // Teams API uses lowercase property names
     const author =
@@ -382,14 +447,22 @@ export class ApiMessageExtractor {
       msg.plainText ??
       '';
 
-    const text = this.stripHtml(typeof body === 'string' ? body : JSON.stringify(body));
+    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+    const text = this.stripHtml(bodyStr);
 
+    // Extract embedded images from HTML body
+    const embeddedImages = this.extractEmbeddedImages(bodyStr);
+
+    // Extract attachments
     const attachments = this.extractAttachments(msg);
 
-    const messageType = (msg.messageType || msg.type || '').toLowerCase();
+    // Extract reactions
+    const reactions = this.extractReactions(msg);
+
+    // Derive type from already-defined messageType
     const derivedType = messageType.includes('system') ? 'system' : null;
 
-    if (!text && attachments.length === 0) {
+    if (!text && attachments.length === 0 && embeddedImages.length === 0) {
       return null;
     }
 
@@ -401,6 +474,8 @@ export class ApiMessageExtractor {
       message: text,
       content: text,
       attachments,
+      embeddedImages,
+      reactions,
       type: derivedType
     };
   }
@@ -452,6 +527,186 @@ export class ApiMessageExtractor {
     }
 
     return out;
+  }
+
+  extractEmbeddedImages(htmlBody) {
+    const images = [];
+    if (!htmlBody || typeof htmlBody !== 'string') return images;
+
+    // Parse HTML to find img tags
+    const div = document.createElement('div');
+    div.innerHTML = htmlBody;
+
+    const imgElements = div.querySelectorAll('img');
+    imgElements.forEach((img) => {
+      const src = img.getAttribute('src') || img.getAttribute('data-src');
+      if (src) {
+        images.push({
+          src: src,
+          alt: img.getAttribute('alt') || '',
+          title: img.getAttribute('title') || '',
+          itemtype: img.getAttribute('itemtype') || '',
+          isEmoji: src.includes('emoji') || src.includes('sticker') || img.classList.contains('emoji')
+        });
+      }
+    });
+
+    // Also check for image URLs in the text (sometimes memes are just URLs)
+    const urlRegex = /(https?:\/\/[^\s<>"]+\.(?:png|jpg|jpeg|gif|webp))/gi;
+    const matches = htmlBody.match(urlRegex) || [];
+    matches.forEach((url) => {
+      // Avoid duplicates
+      if (!images.some(img => img.src === url)) {
+        images.push({
+          src: url,
+          alt: '',
+          title: '',
+          isEmoji: false
+        });
+      }
+    });
+
+    return images;
+  }
+
+  extractReactions(msg) {
+    const reactions = [];
+
+    // Teams stores reactions in properties.emotions or properties.reactions
+    const emotions = msg.properties?.emotions || msg.emotions || msg.reactions;
+
+    if (emotions) {
+      // Emotions can be a JSON string or object
+      let emotionsData = emotions;
+      if (typeof emotions === 'string') {
+        try {
+          emotionsData = JSON.parse(emotions);
+        } catch (_e) {
+          return reactions;
+        }
+      }
+
+      // Format: { "like": [{"user": "name", ...}], "heart": [...] }
+      // Or: [{ "key": "like", "users": [...] }]
+      if (Array.isArray(emotionsData)) {
+        emotionsData.forEach((reaction) => {
+          const key = reaction.key || reaction.type || reaction.emoji;
+          const users = reaction.users || reaction.user || [];
+          const userList = Array.isArray(users) ? users : [users];
+          reactions.push({
+            emoji: this.mapReactionKey(key),
+            key: key,
+            count: userList.length,
+            users: userList.map(u => u.displayName || u.name || u.mri || u).filter(Boolean)
+          });
+        });
+      } else if (typeof emotionsData === 'object') {
+        Object.entries(emotionsData).forEach(([key, users]) => {
+          const userList = Array.isArray(users) ? users : [users];
+          reactions.push({
+            emoji: this.mapReactionKey(key),
+            key: key,
+            count: userList.length,
+            users: userList.map(u => u?.displayName || u?.name || u?.mri || (typeof u === 'string' ? u : '')).filter(Boolean)
+          });
+        });
+      }
+    }
+
+    return reactions;
+  }
+
+  mapReactionKey(key) {
+    const emojiMap = {
+      'like': '👍',
+      'heart': '❤️',
+      'laugh': '😂',
+      'surprised': '😮',
+      'sad': '😢',
+      'angry': '😠',
+      'thumbsup': '👍',
+      'thumbsdown': '👎',
+      'clap': '👏',
+      'fire': '🔥',
+      'celebrate': '🎉',
+      'thinking': '🤔'
+    };
+    return emojiMap[key?.toLowerCase()] || key || '👍';
+  }
+
+  isSystemCallMessage(content) {
+    if (!content || typeof content !== 'string') return false;
+    // Detect call/meeting system messages by common patterns
+    const patterns = [
+      /8:orgid:[a-f0-9-]+/i,  // User ID pattern
+      /callStarted|callEnded/i,
+      /flightproxy\.teams\.microsoft\.com/i,
+      /RecurringException/i,
+      /040000008200E00074C5B7101A82E008/i  // Calendar event ID pattern
+    ];
+    return patterns.some(p => p.test(content));
+  }
+
+  parseCallMessage(msg, content) {
+    const tsRaw = msg.createdDateTime || msg.originalArrivalTime || msg.composetime || msg.timestamp;
+    const isoTimestamp = this.parseIso(tsRaw);
+    const timestamp = isoTimestamp ? new Date(isoTimestamp).toLocaleString() : (tsRaw || '');
+
+    // Try to extract meeting title
+    let meetingTitle = null;
+    // Look for text between brackets like [Meeting Name]
+    const bracketMatch = content.match(/\[([^\]]+)\]/);
+    if (bracketMatch) {
+      meetingTitle = bracketMatch[1];
+    }
+
+    // Determine if it's a call start or end
+    let callAction = null;
+    if (/callStarted/i.test(content)) {
+      callAction = 'started';
+    } else if (/callEnded/i.test(content)) {
+      callAction = 'ended';
+    }
+
+    // Extract participant names from the raw data
+    const participants = [];
+    const nameMatches = content.matchAll(/8:orgid:[a-f0-9-]+([A-Z][a-z]+ [A-Z][a-z]+)/g);
+    for (const match of nameMatches) {
+      if (match[1] && !participants.includes(match[1])) {
+        participants.push(match[1]);
+      }
+    }
+
+    // Build a readable message
+    let readableMessage = '';
+    if (callAction === 'started') {
+      readableMessage = '📞 Call started';
+    } else if (callAction === 'ended') {
+      readableMessage = '📞 Call ended';
+    } else {
+      readableMessage = '📅 Meeting event';
+    }
+
+    if (meetingTitle) {
+      readableMessage += `: ${meetingTitle}`;
+    }
+
+    if (participants.length > 0) {
+      readableMessage += ` (${participants.join(', ')})`;
+    }
+
+    return {
+      id: msg.id || msg.messageId,
+      author: 'System',
+      timestamp,
+      isoTimestamp,
+      message: readableMessage,
+      content: readableMessage,
+      type: 'system',
+      attachments: [],
+      embeddedImages: [],
+      reactions: []
+    };
   }
 
   sortAndDedup(messages) {

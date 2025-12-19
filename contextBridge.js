@@ -54,8 +54,8 @@
     const h2 = document.querySelector('h2');
     if (h2 && h2.textContent) {
       const name = h2.textContent.trim();
-      // Make sure it's not a date or system text
-      if (name.length > 0 && name.length < 100 && !name.includes(',') && !name.includes('Microsoft')) {
+      // Make sure it's not a system text (allow commas for "Last, First" format)
+      if (name.length > 0 && name.length < 100 && !name.includes('Microsoft')) {
         console.log('[Context Bridge] Found chat name from h2:', name);
         return name;
       }
@@ -78,69 +78,110 @@
 
   /**
    * Finds conversation ID by matching active chat name to sidebar items
+   * Prioritizes: exact matches > 1-on-1 chats > partial matches
    */
   const findConversationIdByName = (chatName) => {
     if (!chatName) return null;
 
-    // Find all tree items with conversation IDs
     const treeItems = document.querySelectorAll('[data-fui-tree-item-value*="19:"]');
+    const normalizedChatName = chatName.toLowerCase().trim();
+
+    let exactMatch = null;
+    let oneOnOneMatch = null;
+    let partialMatch = null;
 
     for (const item of treeItems) {
-      // Get the text content of this item (the chat name)
-      const itemText = item.textContent || '';
+      const treeValue = item.getAttribute('data-fui-tree-item-value');
+      if (!treeValue) continue;
 
-      // Check if this item's text contains the chat name
-      if (itemText.includes(chatName) || chatName.includes(itemText.trim().split('\n')[0])) {
-        const treeValue = item.getAttribute('data-fui-tree-item-value');
-        if (treeValue) {
-          // Extract the 19:... conversation ID from the tree value
-          // Format: OneGQL_.../OneGQL_...|19:conversation-id
-          const match = treeValue.match(/(19:[^/\s|]+)/);
-          if (match && match[1].length > 25) {
-            console.log('[Context Bridge] Found conversation ID by matching name "' + chatName + '"');
-            return match[1];
-          }
+      const idMatch = treeValue.match(/(19:[^/\s|]+)/);
+      if (!idMatch || idMatch[1].length < 25) continue;
+
+      const conversationId = idMatch[1];
+      const isOneOnOne = conversationId.includes('@unq.gbl.spaces');
+
+      // Get ONLY the first line (chat name), not preview text
+      const itemText = item.textContent || '';
+      const firstLine = itemText.split('\n')[0]?.trim() || '';
+      const normalizedFirstLine = firstLine.toLowerCase();
+
+      // Check for EXACT match (first line equals chat name)
+      if (normalizedFirstLine === normalizedChatName || firstLine === chatName) {
+        console.log('[Context Bridge] EXACT match found:', firstLine);
+        if (isOneOnOne) {
+          // Exact match + 1-on-1 = perfect, return immediately
+          return conversationId;
+        }
+        exactMatch = conversationId;
+        continue;
+      }
+
+      // Check if first line STARTS with the chat name (handles "Name, Person [NH]" format)
+      if (normalizedFirstLine.startsWith(normalizedChatName) || normalizedChatName.startsWith(normalizedFirstLine)) {
+        if (isOneOnOne && !oneOnOneMatch) {
+          console.log('[Context Bridge] 1-on-1 partial match:', firstLine);
+          oneOnOneMatch = conversationId;
+        } else if (!partialMatch) {
+          partialMatch = conversationId;
         }
       }
     }
+
+    // Return in priority order: exact > 1-on-1 > partial
+    if (exactMatch) {
+      console.log('[Context Bridge] Using exact match');
+      return exactMatch;
+    }
+    if (oneOnOneMatch) {
+      console.log('[Context Bridge] Using 1-on-1 match');
+      return oneOnOneMatch;
+    }
+    if (partialMatch) {
+      console.log('[Context Bridge] Using partial match (group chat)');
+      return partialMatch;
+    }
+
     return null;
   };
 
   const findConversationId = () => {
-    // Check override first
-    const override = localStorage.getItem('teamsChatConversationIdOverride') ||
-                     localStorage.getItem('teamsChatApiConversationId');
-    if (override && override.includes('19:')) {
-      console.log('[Context Bridge] Found conversation ID in override');
-      return override.match(/(19:[^"'\s<>]+)/)?.[1] || null;
-    }
-
-    // Check if chatFetchOverride captured the current conversation ID
-    if (window.__teamsCurrentConversationId) {
-      console.log('[Context Bridge] Found conversation ID from fetch intercept');
-      return window.__teamsCurrentConversationId;
-    }
-
-    // === NEW: Match active chat name to sidebar item ===
+    // PRIORITY 1: Match active chat name to sidebar item (most reliable for Teams v2)
     const activeChatName = getActiveChatName();
     if (activeChatName) {
       console.log('[Context Bridge] Active chat name:', activeChatName);
       const idByName = findConversationIdByName(activeChatName);
       if (idByName) {
+        console.log('[Context Bridge] Found conversation ID by matching name');
         return idByName;
       }
     }
 
-    // Check URL (some Teams versions include it)
+    // PRIORITY 2: Check URL (some Teams versions include conversation ID)
     const urlMatch = window.location.href.match(/(19:[^/?#"]+)/);
     if (urlMatch && urlMatch[1].length > 25) {
       console.log('[Context Bridge] Found conversation ID in URL');
       return urlMatch[1];
     }
 
-    // === CHECK PERFORMANCE ENTRIES ===
+    // PRIORITY 3: Check selected/focused tree item
+    const treeItems = document.querySelectorAll('[data-fui-tree-item-value*="19:"]');
+    for (const item of treeItems) {
+      const isSelected = item.getAttribute('aria-selected') === 'true';
+      const isFocused = item === document.activeElement || item.contains(document.activeElement);
+
+      if (isSelected || isFocused) {
+        const val = item.getAttribute('data-fui-tree-item-value');
+        const match = val.match(/(19:[^/\s|]+)/);
+        if (match && match[1].length > 25) {
+          console.log('[Context Bridge] Found conversation ID in selected tree item');
+          return match[1];
+        }
+      }
+    }
+
+    // PRIORITY 4: Check performance entries for recent API calls
     const perfEntries = performance?.getEntriesByType?.('resource') || [];
-    for (let i = perfEntries.length - 1; i >= Math.max(0, perfEntries.length - 100); i--) {
+    for (let i = perfEntries.length - 1; i >= Math.max(0, perfEntries.length - 50); i--) {
       const name = perfEntries[i].name || '';
       if ((name.includes('/conversations/') || name.includes('/threads/')) && name.includes('19:')) {
         const match = name.match(/(?:conversations|threads)\/(19:[^/?#&]+)/);
@@ -151,36 +192,10 @@
       }
     }
 
-    // === SCAN ALL TREE ITEMS WITH 19: ===
-    // Look for any selected or focused item
-    const treeItems = document.querySelectorAll('[data-fui-tree-item-value*="19:"]');
-    for (const item of treeItems) {
-      const isSelected = item.getAttribute('aria-selected') === 'true';
-      const isFocused = item === document.activeElement || item.contains(document.activeElement);
-      const hasSelectedChild = item.querySelector('[aria-selected="true"]');
-
-      if (isSelected || isFocused || hasSelectedChild) {
-        const val = item.getAttribute('data-fui-tree-item-value');
-        const match = val.match(/(19:[^/\s|]+)/);
-        if (match && match[1].length > 25) {
-          console.log('[Context Bridge] Found conversation ID in selected/focused tree item');
-          return match[1];
-        }
-      }
-    }
-
-    // Last resort: just get the first tree item with a conversation ID
-    // (assuming the user is viewing it)
-    for (const item of treeItems) {
-      const val = item.getAttribute('data-fui-tree-item-value');
-      // Only match chat conversations, not channels
-      if (val && val.includes('Conversation|19:')) {
-        const match = val.match(/(19:[^/\s|]+)/);
-        if (match && match[1].length > 25) {
-          console.log('[Context Bridge] Using first visible chat conversation ID');
-          return match[1];
-        }
-      }
+    // PRIORITY 5: Last resort - use fetch intercept (might be stale)
+    if (window.__teamsCurrentConversationId) {
+      console.log('[Context Bridge] Using fetch intercept ID (last resort)');
+      return window.__teamsCurrentConversationId;
     }
 
     console.log('[Context Bridge] No conversation ID found');

@@ -530,6 +530,24 @@ body {
 
         messageBubble.appendChild(messageText);
 
+        // Add embedded images if present
+        if (msg.embeddedImages && msg.embeddedImages.length > 0) {
+          const imagesDiv = document.createElement('div');
+          imagesDiv.style.cssText = 'margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;';
+          msg.embeddedImages.forEach(img => {
+            if (img.isEmoji) return;
+            const imgEl = document.createElement('img');
+            imgEl.src = img.src;
+            imgEl.alt = img.alt || 'Image';
+            imgEl.style.cssText = 'max-width: 300px; max-height: 200px; border-radius: 8px; cursor: pointer;';
+            imgEl.onclick = () => window.open(img.src, '_blank');
+            imagesDiv.appendChild(imgEl);
+          });
+          if (imagesDiv.children.length > 0) {
+            messageBubble.appendChild(imagesDiv);
+          }
+        }
+
         // Add reactions display if present
         if (msg.reactions && msg.reactions.length > 0) {
           const reactionsDiv = document.createElement('div');
@@ -538,7 +556,7 @@ body {
             const chip = document.createElement('span');
             chip.style.cssText = 'background: rgba(0,0,0,0.08); padding: 2px 8px; border-radius: 12px; font-size: 12px;';
             chip.textContent = (r.emoji || '') + ' ' + (r.count || 1);
-            chip.title = r.reactors ? r.reactors.join(', ') : '';
+            chip.title = r.users ? r.users.join(', ') : '';
             reactionsDiv.appendChild(chip);
           });
           messageBubble.appendChild(reactionsDiv);
@@ -738,7 +756,7 @@ const escapeHtml = (text) => {
  * Generates CSV export of conversations
  */
 const generateCSVExport = (conversations) => {
-  const headers = ['conversation', 'id', 'author', 'timestamp', 'text', 'edited', 'reactions_json', 'attachments_json', 'reply_to_json'];
+  const headers = ['conversation', 'id', 'author', 'timestamp', 'text', 'edited', 'reactions_json', 'attachments_json', 'images_json', 'reply_to_json'];
   const rows = [headers.join(',')];
 
   Object.entries(conversations).forEach(([name, messages]) => {
@@ -755,6 +773,7 @@ const generateCSVExport = (conversations) => {
         msg.edited ? 'true' : 'false',
         JSON.stringify(msg.reactions || []),
         JSON.stringify(msg.attachments || []),
+        JSON.stringify(msg.embeddedImages || []),
         JSON.stringify(msg.replyTo || null)
       ].map(field => `"${String(field).replace(/"/g, '""')}"`);
 
@@ -797,6 +816,17 @@ const generateTXTExport = (conversations) => {
 
       lines.push(`[${ts}] ${author}${editedMarker}:`);
       lines.push(text);
+
+      // Add images if present
+      if (msg.embeddedImages && msg.embeddedImages.length > 0) {
+        const nonEmoji = msg.embeddedImages.filter(img => !img.isEmoji);
+        if (nonEmoji.length > 0) {
+          lines.push(`  Images: ${nonEmoji.length} image(s)`);
+          nonEmoji.forEach(img => {
+            lines.push(`    - ${img.src}`);
+          });
+        }
+      }
 
       // Add reactions if present
       if (msg.reactions && msg.reactions.length > 0) {
@@ -872,6 +902,21 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentUser = null;
   let selectedUserOption = null;
 
+  // Consistent colors for participants
+  const participantColors = [
+    '#2196F3', // Blue
+    '#9C27B0', // Purple
+    '#4CAF50', // Green
+    '#FF9800', // Orange
+    '#F44336', // Red
+    '#00BCD4', // Cyan
+    '#E91E63', // Pink
+    '#795548', // Brown
+  ];
+
+  // Cache for author colors (consistent per conversation)
+  let authorColorMap = new Map();
+
   // Function to generate initials and a random pastel background color
   const generateAvatar = (name) => {
     const words = name.split(' ').filter(word => word.length > 0);
@@ -883,12 +928,92 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const pastelColors = [
-      '#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', 
+      '#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF',
       '#E0BBE4', '#957DAD', '#D291BC', '#FFC72C', '#DA2C38'
     ];
     const randomColor = pastelColors[Math.floor(Math.random() * pastelColors.length)];
 
     return { initials: initials.toUpperCase(), backgroundColor: randomColor };
+  };
+
+  // Get participants in a conversation
+  const getConversationParticipants = (conversationName) => {
+    const messages = allConversations[conversationName] || [];
+    const participants = new Map();
+
+    messages.forEach(msg => {
+      if (msg.author && msg.author !== 'Unknown' && msg.type !== 'divider' && msg.type !== 'system') {
+        if (!participants.has(msg.author)) {
+          participants.set(msg.author, 0);
+        }
+        participants.set(msg.author, participants.get(msg.author) + 1);
+      }
+    });
+
+    // Sort by message count (most messages first)
+    return Array.from(participants.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, count]) => ({ name, count }));
+  };
+
+  // Update participants display
+  const updateParticipantsDisplay = (conversationName) => {
+    const participantsList = document.getElementById('participants-list');
+    const userSelect = document.getElementById('current-user-select');
+
+    if (!participantsList || !userSelect) return;
+
+    const participants = getConversationParticipants(conversationName);
+
+    // Build author color map for this conversation
+    authorColorMap.clear();
+    participants.forEach((p, index) => {
+      authorColorMap.set(p.name, index);
+    });
+
+    // Update participants chips
+    participantsList.innerHTML = '';
+    participants.forEach((p, index) => {
+      const color = participantColors[index % participantColors.length];
+      const avatarData = generateAvatar(p.name);
+      const isYou = currentUser === p.name;
+
+      const chip = document.createElement('div');
+      chip.className = 'participant-chip' + (isYou ? ' is-you' : '');
+      chip.style.backgroundColor = color + '20'; // 20% opacity
+      chip.innerHTML = `
+        <div class="participant-avatar" style="background-color: ${color};">${avatarData.initials}</div>
+        <span>${p.name}</span>
+        <span style="color: #999; font-size: 10px;">(${p.count})</span>
+      `;
+      participantsList.appendChild(chip);
+    });
+
+    // Update user select dropdown
+    userSelect.innerHTML = '<option value="">Select yourself...</option>';
+    participants.forEach(p => {
+      const option = document.createElement('option');
+      option.value = p.name;
+      option.textContent = p.name;
+      if (currentUser === p.name) {
+        option.selected = true;
+      }
+      userSelect.appendChild(option);
+    });
+  };
+
+  // Handle user selection change
+  const setupUserSelect = () => {
+    const userSelect = document.getElementById('current-user-select');
+    if (userSelect) {
+      userSelect.addEventListener('change', (e) => {
+        currentUser = e.target.value || null;
+        if (currentConversationName) {
+          updateParticipantsDisplay(currentConversationName);
+          renderMessages(currentConversationName, globalSearchInput.value);
+        }
+      });
+    }
   };
 
   // Function to extract clean name and extraction info from timestamped names
@@ -944,6 +1069,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Add active class to clicked item
         listItem.classList.add('active');
         currentConversationName = name; // Set current conversation (use full name for data lookup)
+        updateParticipantsDisplay(name); // Update participants display
         renderMessages(name, globalSearchInput.value, avatarData.initials, avatarData.backgroundColor); // Render all messages for the selected conversation
       });
       chatList.appendChild(listItem);
@@ -1033,6 +1159,12 @@ document.addEventListener('DOMContentLoaded', () => {
       const bubbleType = messageType || (isFromCurrentUser ? 'sent' : 'received');
       const isSent = bubbleType === 'sent';
 
+      // Add author index for color coding
+      const authorIndex = authorColorMap.get(msg.author);
+      if (authorIndex !== undefined && !isSent) {
+        messageBubble.setAttribute('data-author-index', authorIndex % 5);
+      }
+
       messageContainer.classList.add(bubbleType);
 
       if (isSystemMessage) {
@@ -1091,6 +1223,46 @@ document.addEventListener('DOMContentLoaded', () => {
         messageBubble.appendChild(attachmentsDiv);
       }
 
+      // Add embedded images if present
+      if (msg.embeddedImages && msg.embeddedImages.length > 0) {
+        const imagesDiv = document.createElement('div');
+        imagesDiv.className = 'message-images';
+        imagesDiv.style.cssText = 'margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;';
+        msg.embeddedImages.forEach(img => {
+          if (img.isEmoji) return; // Skip emojis, they're inline
+          const imgContainer = document.createElement('div');
+          imgContainer.style.cssText = 'position: relative; display: inline-block;';
+
+          const imgEl = document.createElement('img');
+          imgEl.src = img.src;
+          imgEl.alt = img.alt || 'Image';
+          imgEl.style.cssText = 'max-width: 300px; max-height: 200px; border-radius: 8px; cursor: pointer;';
+          imgEl.title = 'Click to open full size';
+          imgEl.addEventListener('click', () => window.open(img.src, '_blank'));
+
+          const downloadBtn = document.createElement('button');
+          downloadBtn.textContent = 'Download';
+          downloadBtn.style.cssText = 'position: absolute; bottom: 8px; right: 8px; padding: 4px 8px; font-size: 10px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 4px; cursor: pointer; opacity: 0; transition: opacity 0.2s;';
+          downloadBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const a = document.createElement('a');
+            a.href = img.src;
+            a.download = img.alt || 'image';
+            a.click();
+          });
+
+          imgContainer.addEventListener('mouseenter', () => downloadBtn.style.opacity = '1');
+          imgContainer.addEventListener('mouseleave', () => downloadBtn.style.opacity = '0');
+
+          imgContainer.appendChild(imgEl);
+          imgContainer.appendChild(downloadBtn);
+          imagesDiv.appendChild(imgContainer);
+        });
+        if (imagesDiv.children.length > 0) {
+          messageBubble.appendChild(imagesDiv);
+        }
+      }
+
       // Add reactions display if present
       if (msg.reactions && msg.reactions.length > 0) {
         const reactionsDiv = document.createElement('div');
@@ -1099,7 +1271,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const chip = document.createElement('span');
           chip.className = 'reaction-chip';
           chip.textContent = `${r.emoji} ${r.count}`;
-          chip.title = r.reactors?.join(', ') || '';
+          chip.title = r.users?.join(', ') || '';
           reactionsDiv.appendChild(chip);
         });
         messageBubble.appendChild(reactionsDiv);
@@ -1408,6 +1580,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Load both current extraction and all saved extractions
+  // Set up the user select dropdown handler
+  setupUserSelect();
+
   chrome.storage.local.get(['teamsChatData', 'savedExtractions'], (result) => {
     const savedExtractions = result.savedExtractions || {};
     const teamsChatData = result.teamsChatData || {};
@@ -1420,7 +1595,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (hasCurrentExtraction) {
       allConversations = teamsChatData;
     }
-    
+
     renderChatList();
     if (Object.keys(allConversations).length > 0) {
       const firstConversationName = Object.keys(allConversations)[0];
@@ -1429,6 +1604,7 @@ document.addEventListener('DOMContentLoaded', () => {
         firstListItem.classList.add('active');
       }
       currentConversationName = firstConversationName; // Set current conversation
+      updateParticipantsDisplay(firstConversationName); // Show participants
       const firstAvatarData = generateAvatar(firstConversationName);
       renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
     }
@@ -1436,7 +1612,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const users = getAllUsers();
       if (users.length === 1) {
         currentUser = users[0];
-        document.getElementById('current-user-display').textContent = 'You: ' + currentUser;
+        const userSelect = document.getElementById('current-user-select');
+        if (userSelect) userSelect.value = currentUser;
       } else if (users.length > 1) {
         setTimeout(() => {
           if (!currentUser) {
