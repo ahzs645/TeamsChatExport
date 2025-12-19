@@ -11,16 +11,18 @@
      "service_worker": "background.js"
   },
   "content_scripts": [ {
+     "css": [ "transcriptStyles.css" ],
      "js": [ "content.js" ],
      "matches": [
         "*://teams.microsoft.com/*",
-        "*://*.teams.microsoft.com/*"
+        "*://*.teams.microsoft.com/*",
+        "https://*/*stream.aspx*"
      ],
      "type": "module",
      "run_at": "document_start",
      "all_frames": true
   } ],
-  "description": "Export Microsoft Teams chat conversations to HTML format.",
+  "description": "Export Microsoft Teams chat conversations and meeting transcripts.",
   "icons": {
      "16": "assets/icon16.png",
      "48": "assets/icon48.png",
@@ -29,9 +31,9 @@
   "manifest_version": 3,
   "name": "Microsoft Teams Chat Exporter",
   "permissions": [ "activeTab", "storage" ],
-  "version": "5.0",
+  "version": "5.1",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "fetchOverride.js", "chatFetchOverride.js", "contextBridge.js" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "fetchOverride.js", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "transcriptStyles.css" ]
   } ]
 }
