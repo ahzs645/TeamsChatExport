@@ -287,6 +287,12 @@ export class ApiMessageExtractor {
         const payloadMessages = this.extractFromPayload(data);
         payloadMessages.forEach((msg) => messages.push(msg));
 
+        // Stop if we got 0 messages (no more content)
+        if (payloadMessages.length === 0) {
+          console.log(`[Teams Chat API] No more messages, stopping pagination`);
+          break;
+        }
+
         // Get next page URL - v1 uses syncState, v2 uses @odata.nextLink
         const nextUrl = data?.syncState ||
                        data?._metadata?.syncState ||
@@ -302,7 +308,10 @@ export class ApiMessageExtractor {
         // Use next URL directly
         currentUrl = nextUrl;
       } catch (err) {
-        console.warn('[Teams Chat API capture] fetch error', currentUrl, err);
+        // Don't log 404s as warnings - they're expected when trying multiple endpoints
+        if (!err.message?.includes('404')) {
+          console.warn('[Teams Chat API] fetch error', currentUrl, err);
+        }
         break;
       }
     }
