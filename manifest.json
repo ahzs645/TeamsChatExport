@@ -34,6 +34,6 @@
   "version": "5.1",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "fetchOverride.js", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "transcriptStyles.css" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "transcriptStyles.css" ]
   } ]
 }
