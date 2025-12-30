@@ -218,10 +218,13 @@ const isTeamsPage = () => {
   console.log('Teams Chat Extractor ready');
 
   // === TRANSCRIPT UI SETUP ===
+  // Track if user has manually closed the panel
+  let transcriptPanelClosed = false;
+
   // Create floating panel for transcript extraction on video pages
   const setupTranscriptUI = () => {
-    // Don't add if already exists
-    if (document.querySelector('.transcript-extractor-wrapper')) {
+    // Don't add if already exists or user has closed it
+    if (document.querySelector('.transcript-extractor-wrapper') || transcriptPanelClosed) {
       return;
     }
 
@@ -324,6 +327,7 @@ const isTeamsPage = () => {
 
     // Close button handler
     closeButton.addEventListener('click', () => {
+      transcriptPanelClosed = true;
       wrapper.remove();
     });
 
