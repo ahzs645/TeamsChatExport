@@ -16,6 +16,7 @@
      "matches": [
         "*://teams.microsoft.com/*",
         "*://*.teams.microsoft.com/*",
+        "*://*.sharepoint.com/*",
         "https://*/*stream.aspx*"
      ],
      "type": "module",
@@ -31,9 +32,9 @@
   "manifest_version": 3,
   "name": "Microsoft Teams Chat Exporter",
   "permissions": [ "activeTab", "storage" ],
-  "version": "5.1",
+  "version": "5.4",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "transcriptStyles.css" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "transcriptStyles.css" ]
   } ]
 }
