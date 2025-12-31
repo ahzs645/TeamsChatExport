@@ -357,6 +357,46 @@ const isTeamsPage = () => {
 
   // === VIDEO DOWNLOAD PANEL ===
   let videoDownloadPanelOpen = false;
+  let videoCaptureAvailable = false;
+
+  // Helper to send commands to the injected video capture script
+  const sendVideoCommand = (command, data = {}, timeoutMs = 2000) => {
+    // Use longer timeout for download operations
+    if (command === 'downloadFiles') {
+      timeoutMs = 120000; // 2 minutes for downloads
+    }
+
+    return new Promise((resolve) => {
+      const handler = (e) => {
+        if (e.detail?.command === command) {
+          document.removeEventListener('teamsVideoResponse', handler);
+          resolve(e.detail.result);
+        }
+      };
+      document.addEventListener('teamsVideoResponse', handler);
+      document.dispatchEvent(new CustomEvent('teamsVideoCommand', {
+        detail: { command, data }
+      }));
+      // Timeout
+      setTimeout(() => {
+        document.removeEventListener('teamsVideoResponse', handler);
+        resolve(null);
+      }, timeoutMs);
+    });
+  };
+
+  // Check if video capture is available
+  const checkVideoCaptureAvailable = async () => {
+    const result = await sendVideoCommand('ping');
+    videoCaptureAvailable = result?.available === true;
+    return videoCaptureAvailable;
+  };
+
+  // Listen for video capture ready event
+  document.addEventListener('teamsVideoReady', () => {
+    videoCaptureAvailable = true;
+    console.log('[Teams Chat Extractor] Video capture ready');
+  });
 
   const setupVideoDownloadPanel = () => {
     if (videoDownloadPanelOpen || document.getElementById('video-download-panel')) {
@@ -390,13 +430,13 @@ const isTeamsPage = () => {
       <div class="vdp-progress">
         <div class="vdp-progress-fill" id="vdp-progress-fill"></div>
       </div>
-      <div class="vdp-status" id="vdp-status">Click Start - plays at 16x speed while downloading segments</div>
+      <div class="vdp-status" id="vdp-status">Click Start - plays at high speed while downloading segments</div>
       <div class="vdp-buttons">
         <button class="vdp-btn vdp-capture" id="vdp-capture">🚀 Start Capture</button>
         <button class="vdp-btn vdp-stop" id="vdp-stop" disabled>⏹ Stop</button>
         <button class="vdp-btn vdp-download" id="vdp-download" disabled>💾 Save Files</button>
       </div>
-      <div class="vdp-tip">Plays at 16x speed (~1 min for 18min video). Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy output.mp4</div>
+      <div class="vdp-tip">Plays at max speed (browser may cap at 16x). Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy output.mp4</div>
     `;
 
     document.body.appendChild(panel);
@@ -414,19 +454,18 @@ const isTeamsPage = () => {
 
     let isCapturing = false;
 
-    // Listen for segment updates
+    // Estimate expected segments (roughly 2 seconds per segment)
+    const expectedSegments = Math.ceil(totalDuration / 2);
+
+    // Listen for segment updates from injected script
     const updateHandler = (e) => {
-      const { videoCount, audioCount, videoPending, audioPending, maxTime } = e.detail;
+      const { videoCount, audioCount, videoPending, audioPending } = e.detail;
       videoCountEl.textContent = videoPending > 0 ? `${videoCount} (+${videoPending})` : videoCount;
       audioCountEl.textContent = audioPending > 0 ? `${audioCount} (+${audioPending})` : audioCount;
 
-      const capturedSecs = maxTime / 1000;
-      const mins = Math.floor(capturedSecs / 60);
-      const secs = Math.floor(capturedSecs % 60);
-      durationEl.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
-
-      const progress = (capturedSecs / totalDuration) * 100;
-      progressEl.style.width = `${Math.min(progress, 100)}%`;
+      // Show segment-based progress (more reliable than time)
+      const capturedCount = videoCount || 0;
+      durationEl.textContent = `${capturedCount}/${expectedSegments} segs`;
 
       // Enable download if we have segments
       if (videoCount > 0 && !isCapturing) {
@@ -435,10 +474,25 @@ const isTeamsPage = () => {
     };
     window.addEventListener('teamsVideoSegmentUpdate', updateHandler);
 
+    // Check if capture is available
+    checkVideoCaptureAvailable().then(available => {
+      if (available) {
+        statusEl.textContent = 'Ready! Click Start Capture to begin.';
+      } else {
+        statusEl.textContent = '⏳ Waiting for video capture to initialize...';
+        // Retry after a short delay
+        setTimeout(async () => {
+          if (await checkVideoCaptureAvailable()) {
+            statusEl.textContent = 'Ready! Click Start Capture to begin.';
+          }
+        }, 1000);
+      }
+    });
+
     // Close panel
-    closeBtn.addEventListener('click', () => {
-      if (isCapturing && window.__teamsVideoCapture) {
-        window.__teamsVideoCapture.stopCapture();
+    closeBtn.addEventListener('click', async () => {
+      if (isCapturing) {
+        await sendVideoCommand('stopCapture');
       }
       window.removeEventListener('teamsVideoSegmentUpdate', updateHandler);
       panel.remove();
@@ -447,9 +501,13 @@ const isTeamsPage = () => {
 
     // Start high-speed capture
     captureBtn.addEventListener('click', async () => {
-      if (!window.__teamsVideoCapture) {
-        statusEl.textContent = '❌ Video capture not available. Reload page.';
-        return;
+      // Check availability
+      if (!videoCaptureAvailable) {
+        const available = await checkVideoCaptureAvailable();
+        if (!available) {
+          statusEl.textContent = '❌ Video capture not available. Reload page and try again.';
+          return;
+        }
       }
 
       isCapturing = true;
@@ -457,38 +515,87 @@ const isTeamsPage = () => {
       stopBtn.disabled = false;
       downloadBtn.disabled = true;
 
-      statusEl.textContent = '🚀 Starting high-speed capture (16x)...';
+      statusEl.textContent = '🚀 Starting capture...';
+
+      // Clear previous capture
+      await sendVideoCommand('clear');
+
+      // Start capture
+      await sendVideoCommand('startCapture', { downloadImmediately: true });
+
+      // Configure video for high-speed playback
+      const wasMuted = video.muted;
+      const wasTime = video.currentTime;
+      const wasRate = video.playbackRate;
+
+      video.muted = true;
+      video.currentTime = 0;
 
       try {
-        await window.__teamsVideoCapture.highSpeedCapture(video, (current, duration, message) => {
-          const percent = Math.round((current / duration) * 100);
-          progressEl.style.width = `${percent}%`;
-          statusEl.textContent = message;
-        });
-
-        statusEl.textContent = '✅ Capture complete! Click Save Files.';
-        downloadBtn.disabled = false;
-      } catch (err) {
-        console.error('[Teams Chat Extractor] Capture failed:', err);
-        statusEl.textContent = '❌ ' + err.message;
+        await video.play();
+        // Set playback rate AFTER play starts (some browsers reject high rates before play)
+        video.playbackRate = 16; // Start with 16x (most reliable)
+        const actualRate = video.playbackRate;
+        statusEl.textContent = `🚀 Playing at ${actualRate}x speed...`;
+      } catch (e) {
+        statusEl.textContent = '⚠️ Click the video play button first, then try again.';
+        isCapturing = false;
+        captureBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
       }
 
-      isCapturing = false;
-      captureBtn.disabled = false;
-      stopBtn.disabled = true;
+      // Monitor progress
+      const progressInterval = setInterval(async () => {
+        if (!isCapturing) {
+          clearInterval(progressInterval);
+          return;
+        }
+
+        const currentTime = video.currentTime;
+        const progress = (currentTime / totalDuration) * 100;
+        progressEl.style.width = `${Math.min(progress, 100)}%`;
+
+        const stats = await sendVideoCommand('getStats');
+        if (stats) {
+          videoCountEl.textContent = stats.videoCount || 0;
+          audioCountEl.textContent = stats.audioCount || 0;
+          statusEl.textContent = `⚡ ${Math.round(progress)}% - ${stats.videoCount || 0} video, ${stats.audioCount || 0} audio segments`;
+        }
+
+        // Check if done
+        if (currentTime >= totalDuration - 1 || video.ended) {
+          clearInterval(progressInterval);
+          video.pause();
+          video.muted = wasMuted;
+          video.playbackRate = wasRate;
+          video.currentTime = wasTime;
+
+          await sendVideoCommand('stopCapture');
+          isCapturing = false;
+          captureBtn.disabled = false;
+          stopBtn.disabled = true;
+
+          const finalStats = await sendVideoCommand('getStats');
+          if (finalStats && finalStats.videoCount > 0) {
+            statusEl.textContent = `✅ Complete! ${finalStats.videoCount} video + ${finalStats.audioCount} audio. Click Save Files.`;
+            downloadBtn.disabled = false;
+          } else {
+            statusEl.textContent = '⚠️ Capture finished but no segments captured.';
+          }
+        }
+      }, 500);
     });
 
     // Stop capture
-    stopBtn.addEventListener('click', () => {
-      if (window.__teamsVideoCapture) {
-        window.__teamsVideoCapture.stopCapture();
-      }
+    stopBtn.addEventListener('click', async () => {
+      await sendVideoCommand('stopCapture');
       video.pause();
       isCapturing = false;
       captureBtn.disabled = false;
       stopBtn.disabled = true;
 
-      const stats = window.__teamsVideoCapture?.getStats();
+      const stats = await sendVideoCommand('getStats');
       if (stats && stats.videoCount > 0) {
         statusEl.textContent = `⏹ Stopped. ${stats.videoCount} segments captured. Click Save Files.`;
         downloadBtn.disabled = false;
@@ -499,60 +606,35 @@ const isTeamsPage = () => {
 
     // Save captured files
     downloadBtn.addEventListener('click', async () => {
-      if (!window.__teamsVideoCapture) {
-        alert('Video capture not available.');
-        return;
-      }
-
       downloadBtn.disabled = true;
-      statusEl.textContent = '💾 Preparing files...';
+      statusEl.textContent = '💾 Starting download...';
+
+      // Listen for progress updates
+      const progressHandler = (e) => {
+        statusEl.textContent = '💾 ' + (e.detail?.message || 'Processing...');
+      };
+      document.addEventListener('teamsVideoDownloadProgress', progressHandler);
 
       try {
-        // Wait for any pending downloads
-        await window.__teamsVideoCapture.waitForPending(5000);
+        // Use the downloadFiles command (handled by videoDownloadOverride.js)
+        const result = await sendVideoCommand('downloadFiles');
 
-        const result = window.__teamsVideoCapture.getBlobs();
+        document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
 
-        if (!result.videoBlob || result.videoCount === 0) {
-          statusEl.textContent = '❌ No video segments captured.';
-          downloadBtn.disabled = false;
-          return;
+        if (!result) {
+          statusEl.textContent = '❌ No response - reload page and try again';
+        } else if (result.error) {
+          statusEl.textContent = '❌ ' + result.error;
+        } else if (result.success) {
+          videoCountEl.textContent = result.videoCount;
+          audioCountEl.textContent = result.audioCount || 'N/A';
+          progressEl.style.width = '100%';
+          statusEl.textContent = `✅ Saved! Merge: ffmpeg -i "${result.title}-video.mp4" -i "${result.title}-audio.mp4" -c copy output.mp4`;
         }
-
-        // Get video title
-        const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
-        const title = titleEl?.innerText?.trim() || document.title?.trim() || 'video';
-        const safeTitle = title.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
-
-        // Download video file
-        statusEl.textContent = '💾 Saving video file...';
-        const videoUrl = URL.createObjectURL(result.videoBlob);
-        const a = document.createElement('a');
-        a.href = videoUrl;
-        a.download = `${safeTitle}-video.mp4`;
-        a.click();
-        URL.revokeObjectURL(videoUrl);
-
-        // Download audio file
-        if (result.audioBlob && result.audioCount > 0) {
-          await new Promise(r => setTimeout(r, 500));
-          statusEl.textContent = '💾 Saving audio file...';
-          const audioUrl = URL.createObjectURL(result.audioBlob);
-          a.href = audioUrl;
-          a.download = `${safeTitle}-audio.mp4`;
-          a.click();
-          URL.revokeObjectURL(audioUrl);
-        }
-
-        videoCountEl.textContent = result.videoCount;
-        audioCountEl.textContent = result.audioCount || 'N/A';
-        progressEl.style.width = '100%';
-
-        statusEl.textContent = `✅ Saved! Merge: ffmpeg -i "${safeTitle}-video.mp4" -i "${safeTitle}-audio.mp4" -c copy output.mp4`;
-
       } catch (err) {
+        document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
         console.error('[Teams Chat Extractor] Save failed:', err);
-        statusEl.textContent = '❌ Save failed: ' + err.message;
+        statusEl.textContent = '❌ ' + err.message;
       }
 
       downloadBtn.disabled = false;
