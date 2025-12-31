@@ -362,8 +362,8 @@ const isTeamsPage = () => {
   // Helper to send commands to the injected video capture script
   const sendVideoCommand = (command, data = {}, timeoutMs = 2000) => {
     // Use longer timeout for download operations
-    if (command === 'downloadFiles') {
-      timeoutMs = 120000; // 2 minutes for downloads
+    if (command === 'downloadFiles' || command === 'directDownload') {
+      timeoutMs = 300000; // 5 minutes for downloads
     }
 
     return new Promise((resolve) => {
@@ -432,11 +432,15 @@ const isTeamsPage = () => {
       </div>
       <div class="vdp-status" id="vdp-status">Click Start - plays at high speed while downloading segments</div>
       <div class="vdp-buttons">
-        <button class="vdp-btn vdp-capture" id="vdp-capture">🚀 Start Capture</button>
+        <button class="vdp-btn vdp-capture" id="vdp-capture" title="Best for DRM content - captures decrypted video at 16x speed">🚀 Start Capture</button>
         <button class="vdp-btn vdp-stop" id="vdp-stop" disabled>⏹ Stop</button>
         <button class="vdp-btn vdp-download" id="vdp-download" disabled>💾 Save Files</button>
       </div>
-      <div class="vdp-tip">Plays at max speed (browser may cap at 16x). Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy output.mp4</div>
+      <div class="vdp-buttons" style="margin-top: 8px;">
+        <button class="vdp-btn" id="vdp-analyze" style="background: #666;" title="View captured URL patterns in console">🔍 Analyze</button>
+        <button class="vdp-btn" id="vdp-direct" style="background: linear-gradient(135deg, #ff6b6b, #ee5a5a);" title="Fast API download - only works for non-DRM content">⚡ Direct (non-DRM)</button>
+      </div>
+      <div class="vdp-tip">🚀 = DRM content (plays at 16x) | ⚡ = non-DRM (instant). Merge: ffmpeg -i video.mp4 -i audio.mp4 -c copy out.mp4</div>
     `;
 
     document.body.appendChild(panel);
@@ -601,6 +605,52 @@ const isTeamsPage = () => {
         downloadBtn.disabled = false;
       } else {
         statusEl.textContent = '⏹ Capture stopped.';
+      }
+    });
+
+    // Analyze URLs button
+    const analyzeBtn = document.getElementById('vdp-analyze');
+    analyzeBtn.addEventListener('click', async () => {
+      statusEl.textContent = '🔍 Analyzing captured URLs...';
+      const result = await sendVideoCommand('analyzeUrls');
+      if (result) {
+        console.log('[URL Analysis]', result);
+        const urlCount = result.capturedUrls?.length || 0;
+        statusEl.textContent = `🔍 Found ${urlCount} URLs. Check console (F12) for details.`;
+      } else {
+        statusEl.textContent = '❌ No data - play video for a few seconds first';
+      }
+    });
+
+    // Direct download button
+    const directBtn = document.getElementById('vdp-direct');
+    directBtn.addEventListener('click', async () => {
+      statusEl.textContent = '⚡ Testing direct API access...';
+
+      const progressHandler = (e) => {
+        statusEl.textContent = '⚡ ' + (e.detail?.message || 'Processing...');
+      };
+      document.addEventListener('teamsVideoDownloadProgress', progressHandler);
+
+      const result = await sendVideoCommand('directDownload');
+      document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
+
+      if (result) {
+        console.log('[Direct Download Result]', result);
+        if (result.success) {
+          if (result.isDrmProtected) {
+            // DRM detected - guide user to MSE capture
+            statusEl.textContent = `⚠️ DRM detected! Use 🚀 Start Capture instead`;
+            statusEl.style.background = 'rgba(255, 193, 7, 0.3)';
+          } else {
+            statusEl.textContent = `✅ ${result.message}`;
+            statusEl.style.background = 'rgba(40, 167, 69, 0.3)';
+          }
+        } else {
+          statusEl.textContent = `❌ ${result.error || result.message}`;
+        }
+      } else {
+        statusEl.textContent = '❌ No response - reload page';
       }
     });
 
