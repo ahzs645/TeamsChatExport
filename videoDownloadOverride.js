@@ -345,6 +345,266 @@
     return new Blob([combined], { type: mimeType });
   };
 
+  // ============================================
+  // MP4 Muxer - Combines video and audio streams
+  // ============================================
+
+  const MP4Muxer = (() => {
+    const readUint32 = (data, offset) => {
+      return (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+    };
+
+    const writeUint32 = (data, offset, value) => {
+      data[offset] = (value >> 24) & 0xff;
+      data[offset + 1] = (value >> 16) & 0xff;
+      data[offset + 2] = (value >> 8) & 0xff;
+      data[offset + 3] = value & 0xff;
+    };
+
+    const getBoxType = (data, offset) => {
+      return String.fromCharCode(data[offset], data[offset + 1], data[offset + 2], data[offset + 3]);
+    };
+
+    const findBox = (data, type, start = 0, end = null) => {
+      end = end || data.length;
+      let offset = start;
+      while (offset < end - 8) {
+        const size = readUint32(data, offset);
+        const boxType = getBoxType(data, offset + 4);
+        if (size < 8) break;
+        if (boxType === type) return { offset, size };
+        offset += size;
+      }
+      return null;
+    };
+
+    // Find all boxes of a given type within a range
+    const findAllBoxes = (data, type, start = 0, end = null) => {
+      end = end || data.length;
+      const boxes = [];
+      let offset = start;
+      while (offset < end - 8) {
+        const size = readUint32(data, offset);
+        const boxType = getBoxType(data, offset + 4);
+        if (size < 8) break;
+        if (boxType === type) boxes.push({ offset, size });
+        offset += size;
+      }
+      return boxes;
+    };
+
+    const updateTfhdTrackId = (data, moofOffset, moofSize, newTrackId) => {
+      const trafBox = findBox(data, 'traf', moofOffset + 8, moofOffset + moofSize);
+      if (!trafBox) return false;
+      const tfhdBox = findBox(data, 'tfhd', trafBox.offset + 8, trafBox.offset + trafBox.size);
+      if (!tfhdBox) return false;
+      writeUint32(data, tfhdBox.offset + 12, newTrackId);
+      return true;
+    };
+
+    // Update track ID in tkhd box (inside trak)
+    const updateTkhdTrackId = (data, trakOffset, trakSize, newTrackId) => {
+      const tkhdBox = findBox(data, 'tkhd', trakOffset + 8, trakOffset + trakSize);
+      if (!tkhdBox) return false;
+      const version = data[tkhdBox.offset + 8];
+      const trackIdOffset = tkhdBox.offset + (version === 1 ? 20 : 12);
+      writeUint32(data, trackIdOffset, newTrackId);
+      return true;
+    };
+
+    // Create a merged moov box containing both video and audio tracks
+    const createMergedMoov = (videoData, videoMoov, audioData, audioMoov) => {
+      // Find trak boxes in video moov
+      const videoTraks = findAllBoxes(videoData, 'trak', videoMoov.offset + 8, videoMoov.offset + videoMoov.size);
+      // Find trak boxes in audio moov
+      const audioTraks = findAllBoxes(audioData, 'trak', audioMoov.offset + 8, audioMoov.offset + audioMoov.size);
+
+      if (videoTraks.length === 0) {
+        console.error('[MP4Muxer] No video trak found');
+        return null;
+      }
+
+      // Find mvhd box in video moov (movie header - we'll use this)
+      const mvhdBox = findBox(videoData, 'mvhd', videoMoov.offset + 8, videoMoov.offset + videoMoov.size);
+      if (!mvhdBox) {
+        console.error('[MP4Muxer] No mvhd found');
+        return null;
+      }
+
+      // Find mvex box if present (for fragmented mp4)
+      const videoMvex = findBox(videoData, 'mvex', videoMoov.offset + 8, videoMoov.offset + videoMoov.size);
+      const audioMvex = audioMoov ? findBox(audioData, 'mvex', audioMoov.offset + 8, audioMoov.offset + audioMoov.size) : null;
+
+      // Calculate new moov size
+      let newMoovContentSize = mvhdBox.size; // mvhd
+      for (const trak of videoTraks) newMoovContentSize += trak.size;
+
+      // Add audio traks
+      let audioTrakData = [];
+      if (audioMoov && audioTraks.length > 0) {
+        for (const trak of audioTraks) {
+          // Copy audio trak and update track ID to 2
+          const trakCopy = audioData.slice(trak.offset, trak.offset + trak.size);
+          const trakArray = new Uint8Array(trakCopy);
+          updateTkhdTrackId(trakArray, 0, trak.size, 2);
+          audioTrakData.push(trakArray);
+          newMoovContentSize += trak.size;
+        }
+      }
+
+      // Add mvex boxes if present
+      let mvexSize = 0;
+      if (videoMvex) mvexSize += videoMvex.size;
+      // For audio mvex, we need to copy trex boxes with updated track IDs
+      let audioTrexData = null;
+      if (audioMvex) {
+        const audioTrex = findBox(audioData, 'trex', audioMvex.offset + 8, audioMvex.offset + audioMvex.size);
+        if (audioTrex) {
+          audioTrexData = new Uint8Array(audioData.slice(audioTrex.offset, audioTrex.offset + audioTrex.size));
+          // Update track ID in trex (offset 12 from box start)
+          writeUint32(audioTrexData, 12, 2);
+          mvexSize += audioTrex.size;
+        }
+      }
+
+      // Create new mvex if we have both video and audio
+      let newMvexData = null;
+      if (videoMvex && audioTrexData) {
+        const videoTrex = findBox(videoData, 'trex', videoMvex.offset + 8, videoMvex.offset + videoMvex.size);
+        if (videoTrex) {
+          const newMvexSize = 8 + videoTrex.size + audioTrexData.length;
+          newMvexData = new Uint8Array(newMvexSize);
+          writeUint32(newMvexData, 0, newMvexSize);
+          newMvexData[4] = 'm'.charCodeAt(0);
+          newMvexData[5] = 'v'.charCodeAt(0);
+          newMvexData[6] = 'e'.charCodeAt(0);
+          newMvexData[7] = 'x'.charCodeAt(0);
+          newMvexData.set(videoData.subarray(videoTrex.offset, videoTrex.offset + videoTrex.size), 8);
+          newMvexData.set(audioTrexData, 8 + videoTrex.size);
+          newMoovContentSize += newMvexSize;
+        }
+      } else if (videoMvex) {
+        newMoovContentSize += videoMvex.size;
+      }
+
+      // Build new moov
+      const newMoovSize = 8 + newMoovContentSize;
+      const newMoov = new Uint8Array(newMoovSize);
+      let offset = 0;
+
+      // Write moov header
+      writeUint32(newMoov, 0, newMoovSize);
+      newMoov[4] = 'm'.charCodeAt(0);
+      newMoov[5] = 'o'.charCodeAt(0);
+      newMoov[6] = 'o'.charCodeAt(0);
+      newMoov[7] = 'v'.charCodeAt(0);
+      offset = 8;
+
+      // Write mvhd
+      newMoov.set(videoData.subarray(mvhdBox.offset, mvhdBox.offset + mvhdBox.size), offset);
+      offset += mvhdBox.size;
+
+      // Write video traks
+      for (const trak of videoTraks) {
+        newMoov.set(videoData.subarray(trak.offset, trak.offset + trak.size), offset);
+        offset += trak.size;
+      }
+
+      // Write audio traks
+      for (const trakArray of audioTrakData) {
+        newMoov.set(trakArray, offset);
+        offset += trakArray.length;
+      }
+
+      // Write mvex
+      if (newMvexData) {
+        newMoov.set(newMvexData, offset);
+        offset += newMvexData.length;
+      } else if (videoMvex) {
+        newMoov.set(videoData.subarray(videoMvex.offset, videoMvex.offset + videoMvex.size), offset);
+        offset += videoMvex.size;
+      }
+
+      console.log(`[MP4Muxer] Created merged moov: ${newMoovSize} bytes (${videoTraks.length} video + ${audioTrakData.length} audio tracks)`);
+      return newMoov;
+    };
+
+    const mux = (videoInit, videoSegments, audioInit, audioSegments) => {
+      if (!videoInit || videoSegments.length === 0) {
+        console.error('[MP4Muxer] No video data');
+        return null;
+      }
+
+      const videoData = new Uint8Array(videoInit);
+      const hasAudio = audioInit && audioSegments.length > 0;
+      const audioData = hasAudio ? new Uint8Array(audioInit) : null;
+
+      const ftypBox = findBox(videoData, 'ftyp');
+      if (!ftypBox) {
+        console.error('[MP4Muxer] No ftyp box found');
+        return null;
+      }
+
+      const videoMoov = findBox(videoData, 'moov');
+      if (!videoMoov) {
+        console.error('[MP4Muxer] No video moov box found');
+        return null;
+      }
+
+      const audioMoov = hasAudio ? findBox(audioData, 'moov') : null;
+
+      // Create merged moov with both tracks
+      const mergedMoov = hasAudio && audioMoov
+        ? createMergedMoov(videoData, videoMoov, audioData, audioMoov)
+        : videoData.subarray(videoMoov.offset, videoMoov.offset + videoMoov.size);
+
+      if (!mergedMoov) {
+        console.error('[MP4Muxer] Failed to create merged moov');
+        return null;
+      }
+
+      // Calculate output size
+      let totalSize = ftypBox.size + mergedMoov.length;
+      for (const seg of videoSegments) totalSize += seg.byteLength;
+      if (hasAudio) {
+        for (const seg of audioSegments) totalSize += seg.byteLength;
+      }
+
+      const output = new Uint8Array(totalSize);
+      let writeOffset = 0;
+
+      // Write ftyp
+      output.set(videoData.subarray(ftypBox.offset, ftypBox.offset + ftypBox.size), writeOffset);
+      writeOffset += ftypBox.size;
+
+      // Write merged moov
+      output.set(mergedMoov, writeOffset);
+      writeOffset += mergedMoov.length;
+
+      // Interleave segments
+      const maxSegments = Math.max(videoSegments.length, hasAudio ? audioSegments.length : 0);
+      for (let i = 0; i < maxSegments; i++) {
+        if (i < videoSegments.length) {
+          const seg = new Uint8Array(videoSegments[i]);
+          output.set(seg, writeOffset);
+          writeOffset += seg.byteLength;
+        }
+        if (hasAudio && i < audioSegments.length) {
+          const segCopy = new Uint8Array(audioSegments[i]);
+          const moofBox = findBox(segCopy, 'moof');
+          if (moofBox) updateTfhdTrackId(segCopy, moofBox.offset, moofBox.size, 2);
+          output.set(segCopy, writeOffset);
+          writeOffset += segCopy.byteLength;
+        }
+      }
+
+      console.log(`[MP4Muxer] Created ${(output.byteLength / 1024 / 1024).toFixed(1)} MB combined file`);
+      return output.buffer;
+    };
+
+    return { mux, findBox };
+  })();
+
   // API exposed to window for content script access
   window.__teamsVideoCapture = {
     // Start capturing and downloading segments
@@ -654,7 +914,7 @@
         result = { success: true };
         break;
       case 'ping':
-        result = { available: true, version: 'v6.3-mse' };
+        result = { available: true, version: 'v6.4-mux' };
         break;
 
       case 'analyzeUrls':
@@ -920,6 +1180,69 @@
           result = { success: false, error: err.message };
         }
         break;
+
+      case 'downloadCombined':
+        // Download combined video+audio file using inlined MP4 muxer
+        try {
+          notify('Preparing combined download...');
+
+          // Check if we have MSE captured data
+          if (!mseVideoInit || mseVideoBuffers.length === 0) {
+            throw new Error('No MSE video data captured. Use Start Capture first.');
+          }
+
+          const hasAudioData = mseAudioInit && mseAudioBuffers.length > 0;
+          notify(`Found: ${mseVideoBuffers.length} video + ${mseAudioBuffers.length} audio segments`);
+
+          notify('Muxing video and audio...');
+
+          // Use the inlined muxer to combine
+          const combinedBuffer = MP4Muxer.mux(
+            mseVideoInit,
+            mseVideoBuffers,
+            hasAudioData ? mseAudioInit : null,
+            hasAudioData ? mseAudioBuffers : []
+          );
+
+          if (!combinedBuffer) {
+            throw new Error('Muxing failed - no ftyp/moov boxes found');
+          }
+
+          const sizeMB = (combinedBuffer.byteLength / 1024 / 1024).toFixed(1);
+          notify(`Combined file ready: ${sizeMB} MB`);
+
+          // Get video title
+          const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
+          const title = titleEl?.innerText?.trim() || document.title?.trim() || 'video';
+          const safeTitle = title.replace(/[^a-zA-Z0-9\s-]/g, '').trim() || 'recording';
+
+          // Download combined file
+          notify('Downloading combined file...');
+          const blob = new Blob([combinedBuffer], { type: 'video/mp4' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${safeTitle}.mp4`;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          await new Promise(r => setTimeout(r, 500));
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+
+          notify(`✅ Downloaded: ${safeTitle}.mp4 (${sizeMB} MB)`);
+          result = {
+            success: true,
+            size: combinedBuffer.byteLength,
+            sizeMB: sizeMB,
+            title: safeTitle,
+            hasAudio: hasAudioData
+          };
+        } catch (err) {
+          console.error('[Teams Video] Combined download error:', err);
+          result = { success: false, error: err.message };
+        }
+        break;
     }
 
     // Send result back via another custom event
@@ -929,7 +1252,7 @@
   });
 
   // Notify that the API is ready
-  document.dispatchEvent(new CustomEvent('teamsVideoReady', { detail: { version: 'v6.3-mse' } }));
+  document.dispatchEvent(new CustomEvent('teamsVideoReady', { detail: { version: 'v6.4-mux' } }));
 
-  console.log('[Teams Chat Exporter] Video download override v6.3 installed (MSE + fetch interception)');
+  console.log('[Teams Chat Exporter] Video download override v6.4 installed (MSE capture + muxing)');
 })();

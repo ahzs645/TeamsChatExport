@@ -32,7 +32,7 @@
   "manifest_version": 3,
   "name": "Microsoft Teams Chat Exporter",
   "permissions": [ "activeTab", "storage" ],
-  "version": "6.3",
+  "version": "6.4",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
      "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "transcriptStyles.css", "mp4muxer.js" ]

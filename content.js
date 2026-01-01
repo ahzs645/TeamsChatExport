@@ -434,13 +434,16 @@ const isTeamsPage = () => {
       <div class="vdp-buttons">
         <button class="vdp-btn vdp-capture" id="vdp-capture" title="Best for DRM content - captures decrypted video at 16x speed">🚀 Start Capture</button>
         <button class="vdp-btn vdp-stop" id="vdp-stop" disabled>⏹ Stop</button>
-        <button class="vdp-btn vdp-download" id="vdp-download" disabled>💾 Save Files</button>
       </div>
       <div class="vdp-buttons" style="margin-top: 8px;">
-        <button class="vdp-btn" id="vdp-analyze" style="background: #666;" title="View captured URL patterns in console">🔍 Analyze</button>
-        <button class="vdp-btn" id="vdp-direct" style="background: linear-gradient(135deg, #ff6b6b, #ee5a5a);" title="Fast API download - only works for non-DRM content">⚡ Direct (non-DRM)</button>
+        <button class="vdp-btn vdp-download" id="vdp-combined" disabled style="background: linear-gradient(135deg, #00ff88, #00cc6a);" title="Save combined video+audio as single file">💾 Save Combined</button>
+        <button class="vdp-btn" id="vdp-download" disabled style="background: #666;" title="Save video and audio as separate files">📁 Separate</button>
       </div>
-      <div class="vdp-tip">🚀 = DRM content (plays at 16x) | ⚡ = non-DRM (instant). Merge: ffmpeg -i video.mp4 -i audio.mp4 -c copy out.mp4</div>
+      <div class="vdp-buttons" style="margin-top: 8px;">
+        <button class="vdp-btn" id="vdp-analyze" style="background: #555; font-size: 10px;" title="View captured URL patterns in console">🔍</button>
+        <button class="vdp-btn" id="vdp-direct" style="background: linear-gradient(135deg, #ff6b6b, #ee5a5a); font-size: 10px;" title="Fast API download - only works for non-DRM content">⚡ Direct</button>
+      </div>
+      <div class="vdp-tip">🚀 Start → 💾 Save Combined (auto-merges video+audio)</div>
     `;
 
     document.body.appendChild(panel);
@@ -450,6 +453,7 @@ const isTeamsPage = () => {
     const captureBtn = document.getElementById('vdp-capture');
     const stopBtn = document.getElementById('vdp-stop');
     const downloadBtn = document.getElementById('vdp-download');
+    const combinedBtn = document.getElementById('vdp-combined');
     const videoCountEl = document.getElementById('vdp-video-count');
     const audioCountEl = document.getElementById('vdp-audio-count');
     const durationEl = document.getElementById('vdp-duration');
@@ -474,6 +478,7 @@ const isTeamsPage = () => {
       // Enable download if we have segments
       if (videoCount > 0 && !isCapturing) {
         downloadBtn.disabled = false;
+        combinedBtn.disabled = false;
       }
     };
     window.addEventListener('teamsVideoSegmentUpdate', updateHandler);
@@ -582,8 +587,9 @@ const isTeamsPage = () => {
 
           const finalStats = await sendVideoCommand('getStats');
           if (finalStats && finalStats.videoCount > 0) {
-            statusEl.textContent = `✅ Complete! ${finalStats.videoCount} video + ${finalStats.audioCount} audio. Click Save Files.`;
+            statusEl.textContent = `✅ Complete! ${finalStats.videoCount} video + ${finalStats.audioCount} audio. Click Save.`;
             downloadBtn.disabled = false;
+            combinedBtn.disabled = false;
           } else {
             statusEl.textContent = '⚠️ Capture finished but no segments captured.';
           }
@@ -601,8 +607,9 @@ const isTeamsPage = () => {
 
       const stats = await sendVideoCommand('getStats');
       if (stats && stats.videoCount > 0) {
-        statusEl.textContent = `⏹ Stopped. ${stats.videoCount} segments captured. Click Save Files.`;
+        statusEl.textContent = `⏹ Stopped. ${stats.videoCount} segments captured. Click Save.`;
         downloadBtn.disabled = false;
+        combinedBtn.disabled = false;
       } else {
         statusEl.textContent = '⏹ Capture stopped.';
       }
@@ -687,6 +694,40 @@ const isTeamsPage = () => {
         statusEl.textContent = '❌ ' + err.message;
       }
 
+      downloadBtn.disabled = false;
+    });
+
+    // Save combined file (video+audio muxed together)
+    combinedBtn.addEventListener('click', async () => {
+      combinedBtn.disabled = true;
+      downloadBtn.disabled = true;
+      statusEl.textContent = '💾 Preparing combined file...';
+
+      const progressHandler = (e) => {
+        statusEl.textContent = '💾 ' + (e.detail?.message || 'Processing...');
+      };
+      document.addEventListener('teamsVideoDownloadProgress', progressHandler);
+
+      try {
+        const result = await sendVideoCommand('downloadCombined');
+
+        document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
+
+        if (!result) {
+          statusEl.textContent = '❌ No response - reload page and try again';
+        } else if (result.error) {
+          statusEl.textContent = '❌ ' + result.error;
+        } else if (result.success) {
+          progressEl.style.width = '100%';
+          statusEl.textContent = `✅ Downloaded: ${result.title}.mp4 (${result.sizeMB} MB)`;
+        }
+      } catch (err) {
+        document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
+        console.error('[Teams Chat Extractor] Combined save failed:', err);
+        statusEl.textContent = '❌ ' + err.message;
+      }
+
+      combinedBtn.disabled = false;
       downloadBtn.disabled = false;
     });
   }
