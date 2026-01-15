@@ -106,6 +106,60 @@
       background-color: #ccc;
       cursor: not-allowed;
     }
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      user-select: none;
+    }
+    .section-header .chevron {
+      font-size: 10px;
+      color: #666;
+      transition: transform 0.2s;
+    }
+    .section-header.expanded .chevron {
+      transform: rotate(180deg);
+    }
+    .collapsible-content {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.2s ease-out;
+    }
+    .collapsible-content.expanded {
+      max-height: 200px;
+    }
+    .setting-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .setting-row label {
+      font-size: 12px;
+      color: #333;
+    }
+    .setting-row input {
+      width: 70px;
+      padding: 4px 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 12px;
+      text-align: right;
+    }
+    .setting-row input:focus {
+      outline: none;
+      border-color: #5B5FC5;
+    }
+    .settings-info {
+      font-size: 11px;
+      color: #666;
+      text-align: center;
+      padding: 6px;
+      background: #f8f9fa;
+      border-radius: 4px;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -139,6 +193,34 @@
   <div class="section">
     <div class="section-title">View Results</div>
     <button id="openResultsBtn" class="btn-primary">Open Viewer</button>
+  </div>
+
+  <div class="section">
+    <div class="section-header" id="settingsHeader">
+      <div class="section-title" style="margin-bottom: 0;">Advanced Settings</div>
+      <span class="chevron">&#9660;</span>
+    </div>
+    <div class="collapsible-content" id="settingsContent">
+      <div style="padding-top: 10px;">
+        <div class="setting-row">
+          <label>Max Mode</label>
+          <div class="toggle" id="maxModeToggle">
+            <div class="toggle-slider"></div>
+          </div>
+        </div>
+        <div class="setting-row">
+          <label for="pageSize">Page Size</label>
+          <input type="number" id="pageSize" min="1" max="500" value="200">
+        </div>
+        <div class="setting-row">
+          <label for="maxPages">Max Pages</label>
+          <input type="number" id="maxPages" min="1" max="200" value="15">
+        </div>
+        <div class="settings-info" id="maxMessagesInfo">
+          Up to 3,000 messages
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="popup.js"></script>

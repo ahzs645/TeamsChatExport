@@ -11,8 +11,16 @@ export class ApiMessageExtractor {
     this.conversationStartTs = 0;
   }
 
-  readNumberSetting(key, { min = 1, max = 500, fallback }) {
+  readNumberSetting(key, { min = 1, max = 500, fallback }, storageValue = null) {
     try {
+      // Prefer chrome.storage.local value if provided
+      if (storageValue !== null && storageValue !== undefined) {
+        const n = parseInt(storageValue, 10);
+        if (!Number.isNaN(n)) {
+          return Math.min(Math.max(n, min), max);
+        }
+      }
+      // Fallback to localStorage for backward compatibility
       const raw = localStorage.getItem(key);
       if (!raw) return fallback;
       const n = parseInt(raw, 10);
@@ -21,6 +29,18 @@ export class ApiMessageExtractor {
     } catch (_err) {
       return fallback;
     }
+  }
+
+  async loadStorageSettings() {
+    return new Promise((resolve) => {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        chrome.storage.local.get(['teamsChatApiPageSize', 'teamsChatApiMaxPages', 'teamsChatApiStartTime'], (result) => {
+          resolve(result || {});
+        });
+      } else {
+        resolve({});
+      }
+    });
   }
 
   getHostAndRegion() {
@@ -107,10 +127,13 @@ export class ApiMessageExtractor {
   async fetchConversation(conversationId, { pageSize = 200, maxPages = 15, startTime = 1 } = {}) {
     if (!conversationId) return [];
 
-    // Allow overrides via localStorage
-    const effectivePageSize = this.readNumberSetting('teamsChatApiPageSize', { min: 1, max: 500, fallback: pageSize });
-    const effectiveMaxPages = this.readNumberSetting('teamsChatApiMaxPages', { min: 1, max: 200, fallback: maxPages });
-    const effectiveStartTime = this.readNumberSetting('teamsChatApiStartTime', { min: 1, max: Number.MAX_SAFE_INTEGER, fallback: startTime });
+    // Load settings from chrome.storage.local (set via popup), with localStorage fallback
+    const storageSettings = await this.loadStorageSettings();
+
+    // Allow overrides via chrome.storage.local or localStorage
+    const effectivePageSize = this.readNumberSetting('teamsChatApiPageSize', { min: 1, max: 500, fallback: pageSize }, storageSettings.teamsChatApiPageSize);
+    const effectiveMaxPages = this.readNumberSetting('teamsChatApiMaxPages', { min: 1, max: 200, fallback: maxPages }, storageSettings.teamsChatApiMaxPages);
+    const effectiveStartTime = this.readNumberSetting('teamsChatApiStartTime', { min: 1, max: Number.MAX_SAFE_INTEGER, fallback: startTime }, storageSettings.teamsChatApiStartTime);
 
     const { host, region } = this.getHostAndRegion();
     const encodedId = encodeURIComponent(conversationId);

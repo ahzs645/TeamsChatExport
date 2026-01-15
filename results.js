@@ -1052,15 +1052,17 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="chat-list-item-extraction-date">${extractionTime || ''}</div>
         </div>
         <div class="chat-list-item-actions">
-          <button type="button" class="fui-Button chat-list-item-more-button">
-            <span class="fui-Button__icon">
-              <svg class="fui-Icon-regular" fill="currentColor" aria-hidden="true" width="1em" height="1em" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M6.25 10a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0Zm5 0a1.25 1.25 0 1 1-2.5 0 1.25 1.25 0 0 1 2.5 0ZM15 11.25a1.25 1.25 0 1 0 0-2.5 1.25 1.25 0 0 0 0 2.5Z" fill="currentColor"></path></svg>
-            </span>
+          <button type="button" class="chat-list-item-delete-button" title="Delete conversation">
+            <svg fill="currentColor" aria-hidden="true" width="1em" height="1em" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M8.5 4h3a1.5 1.5 0 0 0-3 0Zm-1 0a2.5 2.5 0 0 1 5 0h5a.5.5 0 0 1 0 1h-1.05l-1.2 10.34A3 3 0 0 1 12.27 18H7.73a3 3 0 0 1-2.98-2.66L3.55 5H2.5a.5.5 0 0 1 0-1h5ZM5.74 15.23A2 2 0 0 0 7.73 17h4.54a2 2 0 0 0 1.99-1.77L15.44 5H4.56l1.18 10.23ZM8.5 7.5c.28 0 .5.22.5.5v6a.5.5 0 0 1-1 0V8c0-.28.22-.5.5-.5Zm3.5.5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V8Z" fill="currentColor"></path></svg>
           </button>
         </div>
       `;
 
-      listItem.addEventListener('click', () => {
+      listItem.addEventListener('click', (e) => {
+        // Don't trigger if delete button was clicked
+        if (e.target.closest('.chat-list-item-delete-button')) {
+          return;
+        }
         // Remove active class from previous item
         const currentActive = document.querySelector('.chat-list-item.active');
         if (currentActive) {
@@ -1072,6 +1074,38 @@ document.addEventListener('DOMContentLoaded', () => {
         updateParticipantsDisplay(name); // Update participants display
         renderMessages(name, globalSearchInput.value, avatarData.initials, avatarData.backgroundColor); // Render all messages for the selected conversation
       });
+
+      // Delete button handler
+      const deleteBtn = listItem.querySelector('.chat-list-item-delete-button');
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (confirm(`Delete "${cleanName}"?\n\nThis will remove this conversation from the viewer.`)) {
+          delete allConversations[name];
+
+          // Update storage
+          chrome.storage.local.set({ savedExtractions: allConversations });
+
+          // If this was the current conversation, clear the view
+          if (currentConversationName === name) {
+            currentConversationName = null;
+            chatTitle.textContent = 'Select a conversation';
+            messageList.innerHTML = '';
+          }
+
+          // Re-render the list
+          renderChatList();
+
+          // Select first remaining conversation if any
+          const remainingNames = Object.keys(allConversations);
+          if (remainingNames.length > 0 && !currentConversationName) {
+            const firstItem = document.querySelector('.chat-list-item');
+            if (firstItem) {
+              firstItem.click();
+            }
+          }
+        }
+      });
+
       chatList.appendChild(listItem);
     }
   };

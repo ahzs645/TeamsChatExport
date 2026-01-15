@@ -88,17 +88,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   };
 
-  // Helper to download file
-  const downloadFile = (content, filename) => {
-    const blob = new Blob([content], {type: 'text/plain;charset=utf-8'});
-    const url = URL.createObjectURL(blob);
-    chrome.downloads.download({
-      url: url,
-      filename: filename,
-      saveAs: true
-    });
-  };
-
   // Copy transcript button
   copyTranscriptBtn.addEventListener('click', () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
@@ -164,9 +153,87 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  // === SETTINGS FUNCTIONS ===
+  const settingsHeader = document.getElementById('settingsHeader');
+  const settingsContent = document.getElementById('settingsContent');
+  const pageSizeInput = document.getElementById('pageSize');
+  const maxPagesInput = document.getElementById('maxPages');
+  const maxMessagesInfo = document.getElementById('maxMessagesInfo');
+  const maxModeToggle = document.getElementById('maxModeToggle');
+
+  // Toggle settings section
+  settingsHeader.addEventListener('click', () => {
+    settingsHeader.classList.toggle('expanded');
+    settingsContent.classList.toggle('expanded');
+  });
+
+  // Update max messages display
+  const updateMaxMessages = () => {
+    const pageSize = parseInt(pageSizeInput.value, 10) || 200;
+    const maxPages = parseInt(maxPagesInput.value, 10) || 15;
+    const maxMessages = pageSize * maxPages;
+    maxMessagesInfo.textContent = `Up to ${maxMessages.toLocaleString()} messages`;
+  };
+
+  // Update max mode toggle state based on values
+  const updateMaxModeState = () => {
+    const pageSize = parseInt(pageSizeInput.value, 10) || 200;
+    const maxPages = parseInt(maxPagesInput.value, 10) || 15;
+    const isMaxMode = pageSize === 500 && maxPages === 200;
+    maxModeToggle.classList.toggle('active', isMaxMode);
+  };
+
+  // Load saved settings
+  const loadSettings = () => {
+    chrome.storage.local.get(['teamsChatApiPageSize', 'teamsChatApiMaxPages'], (result) => {
+      pageSizeInput.value = result.teamsChatApiPageSize || 200;
+      maxPagesInput.value = result.teamsChatApiMaxPages || 15;
+      updateMaxMessages();
+      updateMaxModeState();
+    });
+  };
+
+  // Save settings on change
+  const saveSettings = () => {
+    const pageSize = Math.max(1, Math.min(500, parseInt(pageSizeInput.value, 10) || 200));
+    const maxPages = Math.max(1, Math.min(200, parseInt(maxPagesInput.value, 10) || 15));
+
+    // Normalize input values
+    pageSizeInput.value = pageSize;
+    maxPagesInput.value = maxPages;
+
+    chrome.storage.local.set({
+      teamsChatApiPageSize: pageSize,
+      teamsChatApiMaxPages: maxPages
+    });
+    updateMaxMessages();
+    updateMaxModeState();
+  };
+
+  // Max mode toggle
+  maxModeToggle.addEventListener('click', () => {
+    const isCurrentlyMax = maxModeToggle.classList.contains('active');
+    if (isCurrentlyMax) {
+      // Turn off max mode - restore defaults
+      pageSizeInput.value = 200;
+      maxPagesInput.value = 15;
+    } else {
+      // Turn on max mode
+      pageSizeInput.value = 500;
+      maxPagesInput.value = 200;
+    }
+    saveSettings();
+  });
+
+  pageSizeInput.addEventListener('change', saveSettings);
+  maxPagesInput.addEventListener('change', saveSettings);
+  pageSizeInput.addEventListener('input', () => { updateMaxMessages(); updateMaxModeState(); });
+  maxPagesInput.addEventListener('input', () => { updateMaxMessages(); updateMaxModeState(); });
+
   // Initialize
   loadCurrentState();
   loadTranscriptState();
+  loadSettings();
 
   // Refresh state every 2 seconds
   const stateRefreshInterval = setInterval(() => {
