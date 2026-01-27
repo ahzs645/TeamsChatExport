@@ -49,6 +49,8 @@ document.addEventListener('DOMContentLoaded', () => {
     window.close();
   });
 
+  const batchTranscriptBtn = document.getElementById('batchTranscriptBtn');
+
   // === TRANSCRIPT FUNCTIONS ===
 
   // Check transcript status
@@ -149,6 +151,20 @@ document.addEventListener('DOMContentLoaded', () => {
           a.click();
           URL.revokeObjectURL(url);
         });
+      }
+    });
+  });
+
+  // Batch transcript button - sends message to open the batch panel on the page
+  batchTranscriptBtn.addEventListener('click', () => {
+    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+      if (tabs[0] && tabs[0].url.includes('teams.microsoft.com')) {
+        chrome.tabs.sendMessage(tabs[0].id, {action: 'startBatchTranscript'});
+        batchTranscriptBtn.textContent = 'Running...';
+        batchTranscriptBtn.disabled = true;
+        setTimeout(() => window.close(), 500);
+      } else {
+        alert('Please navigate to a Teams Recap page to use batch download.');
       }
     });
   });

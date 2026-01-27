@@ -47,6 +47,12 @@ const isTeamsPage = () => {
     injectScript('contextBridge.js', 'Context bridge');
   }
 
+  // Inject API fetcher (Response.prototype.json interceptor) — must be early
+  if (!window.__teamsAPIFetcherInjected) {
+    window.__teamsAPIFetcherInjected = true;
+    injectScript('transcriptAPIFetcher.js', 'Transcript API fetcher');
+  }
+
   // Inject transcript fetch override for video/stream pages
   if (!window.__teamsTranscriptOverrideInjected) {
     window.__teamsTranscriptOverrideInjected = true;
@@ -57,6 +63,12 @@ const isTeamsPage = () => {
   if (!window.__teamsVideoOverrideInjected) {
     window.__teamsVideoOverrideInjected = true;
     injectScript('videoDownloadOverride.js', 'Video download override');
+  }
+
+  // Inject batch transcript download
+  if (!window.__teamsBatchTranscriptInjected) {
+    window.__teamsBatchTranscriptInjected = true;
+    injectScript('batchTranscriptDownload.js', 'Batch transcript download');
   }
 
   console.log('[Teams Chat Extractor] Content script starting...');
@@ -175,6 +187,23 @@ const isTeamsPage = () => {
       case 'getCurrentChat':
         const currentChat = TeamsVariantDetector.getCurrentChatTitle();
         sendResponse({chatTitle: currentChat});
+        return true;
+
+      case 'startBatchTranscript':
+        setupBatchTranscriptPanel();
+        sendResponse({ status: 'panel_opened' });
+        return true;
+
+      case 'cancelBatchTranscript':
+        sendBatchCommand('cancel');
+        sendResponse({ status: 'cancelled' });
+        return true;
+
+      case 'getBatchTranscriptStatus':
+        (async () => {
+          const result = await sendBatchCommand('status');
+          sendResponse(result || { running: false });
+        })();
         return true;
 
       case 'getTranscriptStatus':
@@ -343,12 +372,24 @@ const isTeamsPage = () => {
     videoDownloadButton.textContent = '🎬 Video';
     videoDownloadButton.title = 'Download video (captures segments)';
 
+    // Add batch transcript button
+    const batchTranscriptButton = document.createElement('button');
+    batchTranscriptButton.className = 'transcript-extractor-button batch-transcript-btn';
+    batchTranscriptButton.textContent = 'Batch';
+    batchTranscriptButton.title = 'Download transcripts from all meeting instances';
+
     // Insert before close button
     wrapper.insertBefore(videoDownloadButton, closeButton);
+    wrapper.insertBefore(batchTranscriptButton, closeButton);
 
     // Video download handler - opens capture panel
     videoDownloadButton.addEventListener('click', () => {
       setupVideoDownloadPanel();
+    });
+
+    // Batch transcript handler - opens batch panel
+    batchTranscriptButton.addEventListener('click', () => {
+      setupBatchTranscriptPanel();
     });
 
     document.body.appendChild(wrapper);
@@ -380,6 +421,26 @@ const isTeamsPage = () => {
       // Timeout
       setTimeout(() => {
         document.removeEventListener('teamsVideoResponse', handler);
+        resolve(null);
+      }, timeoutMs);
+    });
+  };
+
+  // Helper to send commands to the injected batch transcript script
+  const sendBatchCommand = (command, data = {}, timeoutMs = 600000) => {
+    return new Promise((resolve) => {
+      const handler = (e) => {
+        if (e.detail?.command === command) {
+          document.removeEventListener('teamsBatchTranscriptResponse', handler);
+          resolve(e.detail.result);
+        }
+      };
+      document.addEventListener('teamsBatchTranscriptResponse', handler);
+      document.dispatchEvent(new CustomEvent('teamsBatchTranscriptCommand', {
+        detail: { command, data }
+      }));
+      setTimeout(() => {
+        document.removeEventListener('teamsBatchTranscriptResponse', handler);
         resolve(null);
       }, timeoutMs);
     });
@@ -731,6 +792,188 @@ const isTeamsPage = () => {
       downloadBtn.disabled = false;
     });
   }
+
+  // === BATCH TRANSCRIPT PANEL ===
+  let batchPanelOpen = false;
+
+  const setupBatchTranscriptPanel = () => {
+    if (batchPanelOpen || document.getElementById('batch-transcript-panel')) {
+      return;
+    }
+    batchPanelOpen = true;
+
+    const panel = document.createElement('div');
+    panel.id = 'batch-transcript-panel';
+    panel.innerHTML = `
+      <div class="btp-header">
+        <span>Batch Transcripts</span>
+        <button class="btp-close" id="btp-close">\u00D7</button>
+      </div>
+      <div class="btp-stats">
+        <div>Meetings: <span id="btp-total">--</span></div>
+        <div>With transcript: <span id="btp-found">--</span></div>
+        <div>Progress: <span id="btp-current">0</span> / <span id="btp-total2">--</span></div>
+      </div>
+      <div class="btp-progress">
+        <div class="btp-progress-fill" id="btp-progress-fill"></div>
+      </div>
+      <div class="btp-status" id="btp-status">Click Start to enumerate meetings and extract all transcripts.</div>
+      <div class="btp-log" id="btp-log"></div>
+      <div class="btp-buttons">
+        <button class="btp-btn btp-start" id="btp-start">Start</button>
+        <button class="btp-btn btp-cancel" id="btp-cancel" disabled>Cancel</button>
+      </div>
+      <div class="btp-buttons" style="margin-top: 8px;">
+        <button class="btp-btn btp-download-all" id="btp-download-vtt" disabled>Download All VTT</button>
+        <button class="btp-btn btp-download-all" id="btp-download-txt" disabled>Download All TXT</button>
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+
+    const closeBtn = document.getElementById('btp-close');
+    const startBtn = document.getElementById('btp-start');
+    const cancelBtn = document.getElementById('btp-cancel');
+    const downloadVttBtn = document.getElementById('btp-download-vtt');
+    const downloadTxtBtn = document.getElementById('btp-download-txt');
+    const totalEl = document.getElementById('btp-total');
+    const total2El = document.getElementById('btp-total2');
+    const foundEl = document.getElementById('btp-found');
+    const currentEl = document.getElementById('btp-current');
+    const progressEl = document.getElementById('btp-progress-fill');
+    const statusEl = document.getElementById('btp-status');
+    const logEl = document.getElementById('btp-log');
+
+    let batchResults = null;
+
+    const addLog = (text, type = 'info') => {
+      const line = document.createElement('div');
+      line.className = `btp-log-line btp-log-${type}`;
+      line.textContent = text;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    };
+
+    // Listen for progress events from the injected script
+    const progressHandler = (e) => {
+      const d = e.detail;
+      statusEl.textContent = d.message || '';
+
+      if (d.total) {
+        totalEl.textContent = d.total;
+        total2El.textContent = d.total;
+      }
+      if (d.current) {
+        currentEl.textContent = d.current;
+        const pct = (d.current / d.total) * 100;
+        progressEl.style.width = `${Math.min(pct, 100)}%`;
+      }
+      if (d.transcriptsFound !== undefined) {
+        foundEl.textContent = d.transcriptsFound;
+      }
+
+      if (d.phase === 'extracted') {
+        const src = d.source === 'api' ? '[API]' : '[DOM]';
+        addLog(`${src} ${d.currentMeeting}: ${d.entryCount} entries`, 'success');
+      } else if (d.phase === 'api_attempt') {
+        addLog(`Trying API for ${d.currentMeeting}...`, 'info');
+      } else if (d.phase === 'skipped') {
+        addLog(`${d.currentMeeting}: no transcript`, 'warn');
+      } else if (d.phase === 'complete') {
+        const apiNote = d.apiSuccessCount > 0 ? ` (${d.apiSuccessCount} API, ${d.domFallbackCount} DOM)` : '';
+        addLog(`Complete: ${d.transcriptsFound}/${d.total} meetings had transcripts${apiNote}`, 'success');
+        foundEl.textContent = d.transcriptsFound;
+      }
+    };
+    document.addEventListener('teamsBatchTranscriptProgress', progressHandler);
+
+    // Helper to download a file
+    const downloadFile = (content, filename) => {
+      const a = document.createElement('a');
+      a.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content));
+      a.setAttribute('download', filename);
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+
+    // Sanitize text for filenames
+    const sanitize = (text) => text.replace(/[<>:"/\\|?*]/g, '-').replace(/\s+/g, ' ').trim().substring(0, 80);
+
+    // Close
+    closeBtn.addEventListener('click', () => {
+      sendBatchCommand('cancel');
+      document.removeEventListener('teamsBatchTranscriptProgress', progressHandler);
+      panel.remove();
+      batchPanelOpen = false;
+    });
+
+    // Start
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      cancelBtn.disabled = false;
+      downloadVttBtn.disabled = true;
+      downloadTxtBtn.disabled = true;
+      logEl.innerHTML = '';
+      batchResults = null;
+
+      addLog('Starting batch extraction...');
+      const result = await sendBatchCommand('start');
+
+      startBtn.disabled = false;
+      cancelBtn.disabled = true;
+
+      if (!result) {
+        statusEl.textContent = 'No response from batch script. Reload page.';
+        addLog('Error: no response', 'error');
+        return;
+      }
+      if (result.error) {
+        statusEl.textContent = result.error;
+        addLog(`Error: ${result.error}`, 'error');
+        return;
+      }
+      if (result.success) {
+        batchResults = result;
+        progressEl.style.width = '100%';
+        const withTranscript = result.results.filter((r) => r.hasTranscript);
+        downloadVttBtn.disabled = withTranscript.length === 0;
+        downloadTxtBtn.disabled = withTranscript.length === 0;
+      }
+    });
+
+    // Cancel
+    cancelBtn.addEventListener('click', () => {
+      sendBatchCommand('cancel');
+      cancelBtn.disabled = true;
+      addLog('Cancelled by user', 'warn');
+    });
+
+    // Download all VTT
+    downloadVttBtn.addEventListener('click', () => {
+      if (!batchResults) return;
+      const withTranscript = batchResults.results.filter((r) => r.hasTranscript);
+      const series = sanitize(batchResults.seriesName);
+      withTranscript.forEach((r) => {
+        const date = sanitize(r.meetingDate);
+        downloadFile(r.vtt, `${series} - ${date}.vtt`);
+      });
+      addLog(`Downloaded ${withTranscript.length} VTT files`);
+    });
+
+    // Download all TXT
+    downloadTxtBtn.addEventListener('click', () => {
+      if (!batchResults) return;
+      const withTranscript = batchResults.results.filter((r) => r.hasTranscript);
+      const series = sanitize(batchResults.seriesName);
+      withTranscript.forEach((r) => {
+        const date = sanitize(r.meetingDate);
+        downloadFile(r.txt, `${series} - ${date}.txt`);
+      });
+      addLog(`Downloaded ${withTranscript.length} TXT files`);
+    });
+  };
 
   // Add transcript UI if on a video page
   if (isVideoPage() || isTeamsPage()) {

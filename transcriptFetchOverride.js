@@ -242,5 +242,17 @@
 	// Start DOM extraction immediately
 	startDOMExtraction();
 
+	// Expose utilities for batch transcript download
+	window.__teamsTranscriptUtils = {
+		extractFromDOM,
+		buildVttTranscript,
+		buildTxtTranscript,
+		parseTimestampFromLabel,
+		timestampToSeconds,
+		toSimpleTimestamp,
+		storeTranscript,
+		ensureHiddenDiv
+	};
+
 	console.log('[Teams Chat Exporter] Transcript capture initialized (DOM + fetch)');
 })();

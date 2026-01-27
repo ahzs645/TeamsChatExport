@@ -35,6 +35,6 @@
   "version": "6.4",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "transcriptStyles.css", "mp4muxer.js" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js" ]
   } ]
 }
