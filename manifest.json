@@ -31,8 +31,13 @@
   },
   "manifest_version": 3,
   "name": "Microsoft Teams Chat Exporter",
-  "permissions": [ "activeTab", "storage" ],
-  "version": "6.4",
+  "permissions": [ "activeTab", "storage", "webRequest" ],
+  "host_permissions": [
+     "*://*.sharepoint.com/*",
+     "*://teams.microsoft.com/*",
+     "*://*.teams.microsoft.com/*"
+  ],
+  "version": "6.5",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
      "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js" ]

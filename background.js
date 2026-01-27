@@ -1,3 +1,71 @@
+// === SharePoint Token Capture via webRequest ===
+// Captures Authorization headers from requests to *.sharepoint.com
+// and stores them for use by the batch transcript API fetcher.
+const spTokens = {}; // { hostname: { token, capturedAt } }
+
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    if (!details.requestHeaders) return;
+
+    const authHeader = details.requestHeaders.find(
+      (h) => h.name.toLowerCase() === 'authorization'
+    );
+    if (!authHeader || !authHeader.value) return;
+
+    try {
+      const url = new URL(details.url);
+      const host = url.hostname;
+
+      // Only capture for sharepoint.com hosts
+      if (!host.includes('sharepoint.com') && !host.includes('sharepoint.us')) return;
+
+      spTokens[host] = {
+        token: authHeader.value,
+        capturedAt: Date.now(),
+        host
+      };
+
+      // Store in chrome.storage.local for content scripts to read
+      chrome.storage.local.set({ sharePointTokens: spTokens });
+
+      // Also forward to the active Teams tab immediately
+      if (details.tabId > 0) {
+        chrome.tabs.sendMessage(details.tabId, {
+          action: 'sharePointTokenCaptured',
+          host,
+          token: authHeader.value,
+          capturedAt: Date.now()
+        }, () => {
+          if (chrome.runtime.lastError) {
+            // Tab may not have content script yet, ignore
+          }
+        });
+      }
+    } catch (e) {
+      // Invalid URL, ignore
+    }
+  },
+  {
+    urls: ['*://*.sharepoint.com/*', '*://*.sharepoint.us/*'],
+    types: ['xmlhttprequest', 'other']
+  },
+  ['requestHeaders']
+);
+
+// Allow content scripts to request current captured tokens
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getSharePointTokens') {
+    // Also refresh from storage in case another listener updated it
+    chrome.storage.local.get(['sharePointTokens'], (result) => {
+      const stored = result.sharePointTokens || {};
+      // Merge with in-memory (in-memory is more recent)
+      const merged = { ...stored, ...spTokens };
+      sendResponse({ tokens: merged });
+    });
+    return true; // async
+  }
+});
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "extract") {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {

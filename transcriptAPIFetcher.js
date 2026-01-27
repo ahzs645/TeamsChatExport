@@ -8,6 +8,9 @@
  * Response.prototype.json works because Teams still has to read the response
  * body, and prototype methods can't be pre-cached.
  *
+ * SharePoint auth tokens are captured by chrome.webRequest in background.js
+ * and forwarded here via CustomEvent from the content script.
+ *
  * Collected data is exposed on window.__transcriptAPIData and via a hidden
  * DOM element for the content script to read.
  */
@@ -102,36 +105,6 @@
 		}
 	};
 
-	/**
-	 * Capture SharePoint auth tokens from timelineeventstream and other SP requests.
-	 */
-	const captureSharePointToken = (url, headers) => {
-		if (!url || !headers) return;
-		try {
-			const urlObj = new URL(url);
-			if (urlObj.hostname.includes('sharepoint.com') || urlObj.hostname.includes('sharepoint.us')) {
-				let authHeader = null;
-				if (headers instanceof Headers) {
-					authHeader = headers.get('Authorization');
-				} else if (typeof headers === 'object') {
-					authHeader = headers['Authorization'] || headers['authorization'];
-				}
-				if (authHeader && authHeader.startsWith('Bearer ')) {
-					const host = urlObj.hostname;
-					window.__sharePointTokens[host] = {
-						token: authHeader,
-						capturedAt: Date.now(),
-						host
-					};
-					updateHiddenDiv();
-					console.log(`[Teams Chat Exporter] Captured SharePoint token for ${host}`);
-				}
-			}
-		} catch (e) {
-			// Invalid URL, ignore
-		}
-	};
-
 	// Patch Response.prototype.json to intercept readcollabobject responses
 	Response.prototype.json = function () {
 		const responseUrl = this.url || '';
@@ -150,26 +123,21 @@
 		return origJson.call(this);
 	};
 
-	// Also patch fetch to capture SharePoint auth headers (for future API use)
-	const origFetch = window.__teamsChatExporterOrigFetch || window.fetch;
-	window.__teamsChatExporterOrigFetch = origFetch;
-
-	// We can't reliably override fetch (Teams may have cached it),
-	// so also patch XMLHttpRequest to capture SP tokens
-	const origXHROpen = XMLHttpRequest.prototype.open;
-	const origXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-
-	XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-		this.__tcUrl = url;
-		return origXHROpen.call(this, method, url, ...rest);
-	};
-
-	XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-		if (name.toLowerCase() === 'authorization' && this.__tcUrl) {
-			captureSharePointToken(this.__tcUrl, { Authorization: value });
+	// === Receive SharePoint tokens from background.js via content script ===
+	// background.js captures Authorization headers via chrome.webRequest
+	// and forwards them here through a CustomEvent dispatched by content.js.
+	document.addEventListener('teamsSharePointToken', (e) => {
+		const { host, token, capturedAt } = e.detail || {};
+		if (host && token) {
+			window.__sharePointTokens[host] = {
+				token,
+				capturedAt: capturedAt || Date.now(),
+				host
+			};
+			updateHiddenDiv();
+			console.log(`[Teams Chat Exporter] Received SharePoint token for ${host} (via webRequest)`);
 		}
-		return origXHRSetHeader.call(this, name, value);
-	};
+	});
 
-	console.log('[Teams Chat Exporter] API fetcher initialized (Response.prototype.json + XHR interceptors)');
+	console.log('[Teams Chat Exporter] API fetcher initialized (Response.prototype.json + webRequest token relay)');
 })();

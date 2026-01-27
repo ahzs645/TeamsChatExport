@@ -101,9 +101,33 @@ const isTeamsPage = () => {
 
   const extractionEngine = new ExtractionEngine();
 
+  // --- Forward SharePoint tokens from background to page context ---
+  const forwardTokenToPage = (host, token, capturedAt) => {
+    document.dispatchEvent(new CustomEvent('teamsSharePointToken', {
+      detail: { host, token, capturedAt }
+    }));
+  };
+
+  // Load any previously captured tokens on startup
+  chrome.runtime.sendMessage({ action: 'getSharePointTokens' }, (response) => {
+    if (chrome.runtime.lastError || !response) return;
+    const tokens = response.tokens || {};
+    for (const [host, entry] of Object.entries(tokens)) {
+      if (entry.token) {
+        forwardTokenToPage(host, entry.token, entry.capturedAt);
+      }
+    }
+  });
+
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.action) {
+      case 'sharePointTokenCaptured':
+        // Forward from background script to page context
+        forwardTokenToPage(request.host, request.token, request.capturedAt);
+        sendResponse({ received: true });
+        return true;
+
       case 'getState':
         // Try multiple methods to get the chat name
         let currentChatName = null;
