@@ -1,88 +1,127 @@
-/* Transcript Extractor Floating Panel Styles */
+/* === Native Toolbar Button Styles (Recap Action Toolbar) === */
 
-div.transcript-extractor-wrapper {
-	position: fixed;
-	top: 10px;
-	right: 10px;
-	z-index: 9999;
-	padding: 10px;
-	border-radius: 8px;
-	border: 1px solid #4a4d9e;
-	background: rgba(91, 95, 197, 0.95);
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-	display: flex;
-	gap: 8px;
+/* Icon-only buttons injected into Teams' recap action toolbar */
+.tce-toolbar-btn {
+	display: inline-flex;
 	align-items: center;
-}
-
-div.transcript-extractor-wrapper button.transcript-extractor-button {
-	background-color: #4a4d9e;
-	border-radius: 5px;
-	border: 1px solid #3a3d7e;
-	display: inline-block;
-	cursor: pointer;
-	color: #ffffff;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	font-size: 12px;
-	font-weight: 600;
-	padding: 8px 14px;
-	text-decoration: none;
-	transition: background-color 0.2s, transform 0.1s;
-}
-
-div.transcript-extractor-wrapper button.transcript-extractor-button:hover {
-	background-color: #3a3d7e;
-}
-
-div.transcript-extractor-wrapper button.transcript-extractor-button:active {
-	transform: translateY(1px);
-}
-
-div.transcript-extractor-wrapper button.transcript-extractor-close-button {
-	background-color: transparent;
-	border: none;
-	color: #ffffff;
-	font-size: 16px;
-	padding: 4px 8px;
-	min-width: auto;
-	opacity: 0.8;
-}
-
-div.transcript-extractor-wrapper button.transcript-extractor-close-button:hover {
-	opacity: 1;
-	background-color: rgba(255, 255, 255, 0.1);
-}
-
-/* Status message styling */
-div.transcript-extractor-wrapper .transcript-status {
-	color: #ffffff;
-	font-size: 11px;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	padding: 4px 8px;
-	background: rgba(255, 255, 255, 0.1);
+	justify-content: center;
+	min-width: 32px;
+	height: 32px;
+	padding: 5px;
 	border-radius: 4px;
-	margin-left: 4px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: rgb(214, 214, 214);
+	cursor: pointer;
+	transition: background-color 0.1s ease;
+	position: relative;
+	box-sizing: border-box;
 }
 
-div.transcript-extractor-wrapper .transcript-status.ready {
-	background: rgba(40, 167, 69, 0.3);
+.tce-toolbar-btn:hover {
+	background: rgba(255, 255, 255, 0.08);
 }
 
-div.transcript-extractor-wrapper .transcript-status.waiting {
-	background: rgba(255, 193, 7, 0.3);
+.tce-toolbar-btn:active {
+	background: rgba(255, 255, 255, 0.12);
 }
 
-/* Video Download Button in main toolbar */
-div.transcript-extractor-wrapper button.video-download-btn {
-	background: linear-gradient(135deg, #00d4ff, #0099cc);
-	border-color: #0088bb;
+.tce-toolbar-btn svg {
+	width: 20px;
+	height: 20px;
+	fill: currentColor;
 }
 
-div.transcript-extractor-wrapper button.video-download-btn:hover {
-	background: linear-gradient(135deg, #00bbdd, #0077aa);
+/* Feedback state for copy button */
+.tce-toolbar-btn.tce-copied {
+	color: #00ff88;
 }
 
-/* Video Download Panel Styles */
+/* Tooltip for toolbar buttons */
+.tce-toolbar-btn[title] {
+	position: relative;
+}
+
+/* Download dropdown menu */
+.tce-download-dropdown {
+	position: absolute;
+	top: 100%;
+	left: 50%;
+	transform: translateX(-50%);
+	margin-top: 4px;
+	background: #292929;
+	border: 1px solid #404040;
+	border-radius: 6px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+	z-index: 100000;
+	min-width: 140px;
+	padding: 4px 0;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.tce-download-dropdown-item {
+	display: block;
+	width: 100%;
+	padding: 8px 16px;
+	border: none;
+	background: transparent;
+	color: #d6d6d6;
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+	transition: background-color 0.1s ease;
+	box-sizing: border-box;
+}
+
+.tce-download-dropdown-item:hover {
+	background: rgba(255, 255, 255, 0.08);
+}
+
+/* === Transcript Actions Menubar Buttons (CommandBar style) === */
+
+.tce-cmd-btn {
+	display: inline-flex;
+	align-items: center;
+	height: 42px;
+	padding: 0 12px;
+	border: none;
+	background: transparent;
+	color: rgb(214, 214, 214);
+	font-size: 13px;
+	font-weight: 400;
+	cursor: pointer;
+	font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+	transition: background-color 0.1s ease;
+	white-space: nowrap;
+	gap: 6px;
+}
+
+.tce-cmd-btn:hover {
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.tce-cmd-btn:active {
+	background: rgba(255, 255, 255, 0.1);
+}
+
+.tce-cmd-btn svg {
+	width: 16px;
+	height: 16px;
+	fill: currentColor;
+}
+
+/* Separator between native and extension buttons */
+.tce-cmd-separator {
+	display: inline-block;
+	width: 1px;
+	height: 20px;
+	background: rgba(255, 255, 255, 0.15);
+	margin: 0 4px;
+	vertical-align: middle;
+	align-self: center;
+}
+
+/* === Video Download Panel Styles === */
 #video-download-panel {
 	position: fixed;
 	top: 60px;
@@ -216,17 +255,7 @@ div.transcript-extractor-wrapper button.video-download-btn:hover {
 	word-break: break-word;
 }
 
-/* Batch Transcript Button in main toolbar */
-div.transcript-extractor-wrapper button.batch-transcript-btn {
-	background: linear-gradient(135deg, #ff9a56, #ff6b35);
-	border-color: #e55a2b;
-}
-
-div.transcript-extractor-wrapper button.batch-transcript-btn:hover {
-	background: linear-gradient(135deg, #e88a4a, #dd5a2a);
-}
-
-/* Batch Transcript Panel Styles */
+/* === Batch Transcript Panel Styles === */
 #batch-transcript-panel {
 	position: fixed;
 	top: 60px;

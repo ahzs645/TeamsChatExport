@@ -276,148 +276,194 @@ const isTeamsPage = () => {
 
   console.log('Teams Chat Extractor ready');
 
-  // === TRANSCRIPT UI SETUP ===
-  // Track if user has manually closed the panel
-  let transcriptPanelClosed = false;
+  // === NATIVE TOOLBAR INTEGRATION ===
 
-  // Create floating panel for transcript extraction on video pages
-  const setupTranscriptUI = () => {
-    // Don't add if already exists or user has closed it
-    if (document.querySelector('.transcript-extractor-wrapper') || transcriptPanelClosed) {
+  // SVG icon paths (20x20 viewBox, clean outline style)
+  const SVG_ICONS = {
+    copy: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 14V4.5A1.5 1.5 0 0 1 5.5 3H12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    download: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    batch: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="5" width="10" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 3h7.5A1.5 1.5 0 0 1 16 4.5V14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7 10h4M7 13h2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+    video: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="11" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M13 9l5-3v8l-5-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
+    chevron: '<svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg" style="width:8px;height:5px;margin-left:2px"><path d="M1 1l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+  };
+
+  // Shared helpers for transcript actions
+  const getVideoTitle = () => {
+    const heading = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
+    const h2 = document.querySelector('h2');
+    const videoTitle = heading?.innerText?.trim() || h2?.innerText?.trim() || document.title?.trim() || 'transcript';
+    return videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
+  };
+
+  const getTranscriptData = () => {
+    const container = document.getElementById('teams-chat-exporter-transcript-data');
+    if (!container) return null;
+    return {
+      vtt: container.getAttribute('data-vtt') || container.textContent,
+      txt: container.getAttribute('data-txt') || container.textContent
+    };
+  };
+
+  const downloadFile = (content, filename) => {
+    const a = document.createElement('a');
+    a.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content));
+    a.setAttribute('download', filename);
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // Copy transcript handler
+  const handleCopy = async (btn) => {
+    const data = getTranscriptData();
+    if (!data) {
+      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
       return;
     }
+    try {
+      await navigator.clipboard.writeText(data.vtt);
+      btn.classList.add('tce-copied');
+      const origHTML = btn.innerHTML;
+      if (btn.classList.contains('tce-cmd-btn')) {
+        btn.textContent = 'Copied!';
+      }
+      setTimeout(() => {
+        btn.classList.remove('tce-copied');
+        if (btn.classList.contains('tce-cmd-btn')) {
+          btn.innerHTML = origHTML;
+        }
+      }, 1500);
+    } catch (err) {
+      console.error('[Teams Chat Extractor] Failed to copy:', err);
+    }
+  };
 
-    const wrapper = document.createElement('div');
-    wrapper.className = 'transcript-extractor-wrapper';
+  // Download VTT handler
+  const handleDownloadVTT = () => {
+    const data = getTranscriptData();
+    if (!data) {
+      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
+      return;
+    }
+    downloadFile(data.vtt, `transcript-${getVideoTitle()}.vtt`);
+  };
 
-    const copyButton = document.createElement('button');
-    copyButton.className = 'transcript-extractor-button';
-    copyButton.textContent = 'Copy';
-    copyButton.title = 'Copy transcript to clipboard';
+  // Download TXT handler
+  const handleDownloadTXT = () => {
+    const data = getTranscriptData();
+    if (!data) {
+      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
+      return;
+    }
+    downloadFile(data.txt, `transcript-${getVideoTitle()}.txt`);
+  };
 
-    const downloadVttButton = document.createElement('button');
-    downloadVttButton.className = 'transcript-extractor-button';
-    downloadVttButton.textContent = 'Download VTT';
-    downloadVttButton.title = 'Download as WebVTT subtitle file';
+  // Close any open download dropdown
+  const closeDropdowns = () => {
+    document.querySelectorAll('.tce-download-dropdown').forEach(d => d.remove());
+  };
 
-    const downloadTxtButton = document.createElement('button');
-    downloadTxtButton.className = 'transcript-extractor-button';
-    downloadTxtButton.textContent = 'Download TXT';
-    downloadTxtButton.title = 'Download as plain text file';
+  // Create download dropdown anchored to a button
+  const createDownloadDropdown = (anchorBtn) => {
+    closeDropdowns();
+    const dropdown = document.createElement('div');
+    dropdown.className = 'tce-download-dropdown';
 
-    const closeButton = document.createElement('button');
-    closeButton.className = 'transcript-extractor-button transcript-extractor-close-button';
-    closeButton.textContent = '\u00D7';
-    closeButton.title = 'Close panel';
+    const vttItem = document.createElement('button');
+    vttItem.className = 'tce-download-dropdown-item';
+    vttItem.textContent = 'Download VTT';
+    vttItem.addEventListener('click', () => { handleDownloadVTT(); closeDropdowns(); });
 
-    wrapper.appendChild(copyButton);
-    wrapper.appendChild(downloadVttButton);
-    wrapper.appendChild(downloadTxtButton);
-    wrapper.appendChild(closeButton);
+    const txtItem = document.createElement('button');
+    txtItem.className = 'tce-download-dropdown-item';
+    txtItem.textContent = 'Download TXT';
+    txtItem.addEventListener('click', () => { handleDownloadTXT(); closeDropdowns(); });
 
-    // Helper to get video title for filename
-    const getVideoTitle = () => {
-      const heading = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
-      const videoTitle = heading?.innerText?.trim() || document.title?.trim() || 'transcript';
-      return videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
+    dropdown.appendChild(vttItem);
+    dropdown.appendChild(txtItem);
+    anchorBtn.appendChild(dropdown);
+
+    // Close on outside click
+    const outsideHandler = (e) => {
+      if (!anchorBtn.contains(e.target)) {
+        closeDropdowns();
+        document.removeEventListener('click', outsideHandler, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', outsideHandler, true), 0);
+  };
+
+  // === LOCATION 1: Recap Action Toolbar ===
+  const injectRecapToolbarButtons = () => {
+    // Find toolbar by anchor button
+    const anchorBtn = document.querySelector('[aria-label="Audio recap"]');
+    const toolbar = anchorBtn?.closest('.fui-Toolbar');
+    if (!toolbar || toolbar.hasAttribute('data-tce-injected')) return;
+    toolbar.setAttribute('data-tce-injected', 'true');
+
+    // Create icon buttons
+    const makeBtn = (icon, title, handler) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tce-toolbar-btn';
+      btn.title = title;
+      btn.innerHTML = icon;
+      btn.addEventListener('click', handler);
+      return btn;
     };
 
-    // Helper to get transcript data
-    const getTranscriptData = () => {
-      const container = document.getElementById('teams-chat-exporter-transcript-data');
-      if (!container) {
-        return null;
-      }
-      return {
-        vtt: container.getAttribute('data-vtt') || container.textContent,
-        txt: container.getAttribute('data-txt') || container.textContent
-      };
+    const copyBtn = makeBtn(SVG_ICONS.copy, 'Copy transcript', (e) => handleCopy(e.currentTarget));
+
+    const downloadBtn = makeBtn(SVG_ICONS.download + SVG_ICONS.chevron, 'Download transcript', (e) => {
+      e.stopPropagation();
+      createDownloadDropdown(e.currentTarget);
+    });
+
+    const batchBtn = makeBtn(SVG_ICONS.batch, 'Batch download all transcripts', () => setupBatchTranscriptPanel());
+
+    const videoBtn = makeBtn(SVG_ICONS.video, 'Download video', () => setupVideoDownloadPanel());
+
+    toolbar.appendChild(copyBtn);
+    toolbar.appendChild(downloadBtn);
+    toolbar.appendChild(batchBtn);
+    toolbar.appendChild(videoBtn);
+
+    console.log('[Teams Chat Extractor] Injected buttons into recap action toolbar');
+  };
+
+  // === LOCATION 2: Transcript Actions Menubar ===
+  const injectTranscriptActionButtons = () => {
+    const menubar = document.querySelector('[aria-label="Transcript actions"]');
+    if (!menubar || menubar.hasAttribute('data-tce-injected')) return;
+    menubar.setAttribute('data-tce-injected', 'true');
+
+    // Add a separator first
+    const sep = document.createElement('span');
+    sep.className = 'tce-cmd-separator';
+    menubar.appendChild(sep);
+
+    const makeCmdBtn = (label, icon, handler) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tce-cmd-btn';
+      btn.innerHTML = icon + ' ' + label;
+      btn.addEventListener('click', handler);
+      return btn;
     };
 
-    // Helper to download file
-    const downloadFile = (content, filename) => {
-      const element = document.createElement('a');
-      element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content));
-      element.setAttribute('download', filename);
-      element.style.display = 'none';
-      document.body.appendChild(element);
-      element.click();
-      document.body.removeChild(element);
-    };
+    menubar.appendChild(makeCmdBtn('Copy', SVG_ICONS.copy, (e) => handleCopy(e.currentTarget)));
+    menubar.appendChild(makeCmdBtn('Download VTT', SVG_ICONS.download, handleDownloadVTT));
+    menubar.appendChild(makeCmdBtn('Download TXT', SVG_ICONS.download, handleDownloadTXT));
+    menubar.appendChild(makeCmdBtn('Batch Download', SVG_ICONS.batch, () => setupBatchTranscriptPanel()));
 
-    // Copy button handler
-    copyButton.addEventListener('click', async () => {
-      const data = getTranscriptData();
-      if (!data) {
-        alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(data.vtt);
-        copyButton.textContent = 'Copied!';
-        setTimeout(() => { copyButton.textContent = 'Copy'; }, 2000);
-      } catch (err) {
-        console.error('[Teams Chat Extractor] Failed to copy:', err);
-        alert('Failed to copy transcript to clipboard.');
-      }
-    });
+    console.log('[Teams Chat Extractor] Injected buttons into transcript actions menubar');
+  };
 
-    // Download VTT button handler
-    downloadVttButton.addEventListener('click', () => {
-      const data = getTranscriptData();
-      if (!data) {
-        alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-        return;
-      }
-      const filename = `transcript-${getVideoTitle()}.vtt`;
-      downloadFile(data.vtt, filename);
-    });
-
-    // Download TXT button handler
-    downloadTxtButton.addEventListener('click', () => {
-      const data = getTranscriptData();
-      if (!data) {
-        alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-        return;
-      }
-      const filename = `transcript-${getVideoTitle()}.txt`;
-      downloadFile(data.txt, filename);
-    });
-
-    // Close button handler
-    closeButton.addEventListener('click', () => {
-      transcriptPanelClosed = true;
-      wrapper.remove();
-    });
-
-    // Add video download button
-    const videoDownloadButton = document.createElement('button');
-    videoDownloadButton.className = 'transcript-extractor-button video-download-btn';
-    videoDownloadButton.textContent = '🎬 Video';
-    videoDownloadButton.title = 'Download video (captures segments)';
-
-    // Add batch transcript button
-    const batchTranscriptButton = document.createElement('button');
-    batchTranscriptButton.className = 'transcript-extractor-button batch-transcript-btn';
-    batchTranscriptButton.textContent = 'Batch';
-    batchTranscriptButton.title = 'Download transcripts from all meeting instances';
-
-    // Insert before close button
-    wrapper.insertBefore(videoDownloadButton, closeButton);
-    wrapper.insertBefore(batchTranscriptButton, closeButton);
-
-    // Video download handler - opens capture panel
-    videoDownloadButton.addEventListener('click', () => {
-      setupVideoDownloadPanel();
-    });
-
-    // Batch transcript handler - opens batch panel
-    batchTranscriptButton.addEventListener('click', () => {
-      setupBatchTranscriptPanel();
-    });
-
-    document.body.appendChild(wrapper);
-    console.log('[Teams Chat Extractor] Transcript UI panel added');
+  // Try injecting into both toolbar locations
+  const tryInjectToolbarButtons = () => {
+    injectRecapToolbarButtons();
+    injectTranscriptActionButtons();
   };
 
   // === VIDEO DOWNLOAD PANEL ===
@@ -999,19 +1045,22 @@ const isTeamsPage = () => {
     });
   };
 
-  // Add transcript UI if on a video page
+  // Inject toolbar buttons into Teams native UI
   if (isVideoPage() || isTeamsPage()) {
-    // Wait a bit for the page to load, then check for video content
-    setTimeout(() => {
-      if (isVideoPage() || document.querySelector('video')) {
-        setupTranscriptUI();
-      }
-    }, 2000);
+    // Initial attempt after page loads
+    setTimeout(tryInjectToolbarButtons, 2000);
 
-    // Also watch for dynamic video elements
-    const observer = new MutationObserver((mutations) => {
-      if (document.querySelector('video') && !document.querySelector('.transcript-extractor-wrapper')) {
-        setupTranscriptUI();
+    // Watch for toolbar elements appearing (React re-renders, navigation)
+    const observer = new MutationObserver(() => {
+      // Check if recap toolbar exists but hasn't been injected yet
+      const recapToolbar = document.querySelector('[aria-label="Audio recap"]')?.closest('.fui-Toolbar');
+      if (recapToolbar && !recapToolbar.hasAttribute('data-tce-injected')) {
+        injectRecapToolbarButtons();
+      }
+      // Check if transcript actions bar exists but hasn't been injected yet
+      const transcriptBar = document.querySelector('[aria-label="Transcript actions"]');
+      if (transcriptBar && !transcriptBar.hasAttribute('data-tce-injected')) {
+        injectTranscriptActionButtons();
       }
     });
     observer.observe(document.body, { childList: true, subtree: true });
