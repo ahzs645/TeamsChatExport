@@ -64,6 +64,11 @@ const isTeamsPage = () => {
   if (!window.__teamsVideoOverrideInjected) {
     window.__teamsVideoOverrideInjected = true;
     injectScript('videoDownloadOverride.js', 'Video download override');
+    // Inject modular video download modules
+    injectScript('videoDownload/directDownload.js', 'Video direct download');
+    injectScript('videoDownload/manifestDownload.js', 'Video manifest download');
+    injectScript('videoDownload/captureStreamDownload.js', 'Video capture stream');
+    injectScript('videoDownload/coordinator.js', 'Video download coordinator');
   }
 
   // Inject batch transcript download
@@ -254,6 +259,74 @@ const isTeamsPage = () => {
       case 'startBatchTranscript':
         setupBatchTranscriptPanel();
         sendResponse({ status: 'panel_opened' });
+        return true;
+
+      case 'downloadVideo':
+        // Use the new modular coordinator
+        (() => {
+          const handler = (e) => {
+            if (e.detail?.command === 'download') {
+              document.removeEventListener('tceVideoDownloadResponse', handler);
+              sendResponse(e.detail.result || { error: 'No result' });
+            }
+          };
+          document.addEventListener('tceVideoDownloadResponse', handler);
+          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
+            detail: { command: 'download', data: request.data }
+          }));
+          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 600000);
+        })();
+        return true;
+
+      case 'getVideoDownloadUrl':
+        // Ask coordinator for a direct download URL (for popup)
+        (() => {
+          const handler = (e) => {
+            if (e.detail?.command === 'getDownloadUrl') {
+              document.removeEventListener('tceVideoDownloadResponse', handler);
+              const urlData = e.detail.result;
+              if (urlData && urlData.downloadUrl) {
+                sendResponse({
+                  downloadUrl: urlData.downloadUrl,
+                  fileName: urlData.fileName,
+                  fileSizeMB: urlData.fileSize ? Math.round(urlData.fileSize / 1024 / 1024) : null,
+                  source: 'driveApi'
+                });
+              } else {
+                sendResponse({ error: 'No direct download URL available' });
+              }
+            }
+          };
+          document.addEventListener('tceVideoDownloadResponse', handler);
+          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
+            detail: { command: 'getDownloadUrl' }
+          }));
+          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 10000);
+        })();
+        return true;
+
+      case 'getVideoModules':
+        // Return available download methods (for popup UI)
+        (() => {
+          const handler = (e) => {
+            if (e.detail?.command === 'getAvailableModules') {
+              document.removeEventListener('tceVideoDownloadResponse', handler);
+              sendResponse({ modules: e.detail.result || [] });
+            }
+          };
+          document.addEventListener('tceVideoDownloadResponse', handler);
+          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
+            detail: { command: 'getAvailableModules' }
+          }));
+          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 5000);
+        })();
+        return true;
+
+      case 'stopVideoDownload':
+        document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
+          detail: { command: 'stop' }
+        }));
+        sendResponse({ stopped: true });
         return true;
 
       case 'cancelBatchTranscript':
@@ -725,7 +798,7 @@ const isTeamsPage = () => {
 
     const batchBtn = makeBtn(SVG_ICONS.batch, 'Batch download all transcripts', () => setupBatchTranscriptPanel());
 
-    const videoBtn = makeBtn(SVG_ICONS.video, 'Download video', () => setupVideoDownloadPanel());
+    const videoBtn = makeBtn(SVG_ICONS.video, 'Download video', () => handleDirectVideoDownload());
 
     toolbar.appendChild(copyBtn);
     toolbar.appendChild(downloadBtn);
@@ -837,9 +910,12 @@ const isTeamsPage = () => {
       downloadFile(data.txt, `transcript-${title}.txt`);
     });
 
+    const dlVideoBtn = makeBtn('\u{1F3AC} Video', () => handleDirectVideoDownload());
+
     bar.appendChild(copyBtn);
     bar.appendChild(dlVttBtn);
     bar.appendChild(dlTxtBtn);
+    bar.appendChild(dlVideoBtn);
 
     // Insert after the tablist's parent container (below the tabs, inside the scrollable area)
     targetTablist.parentElement.insertAdjacentElement('afterend', bar);
@@ -914,6 +990,67 @@ const isTeamsPage = () => {
     videoCaptureAvailable = true;
     console.log('[Teams Chat Extractor] Video capture ready');
   });
+
+  // === DIRECT VIDEO DOWNLOAD (preferred, uses SharePoint API) ===
+  const getVideoDriveItem = () => {
+    // Read from hidden div (populated by transcriptAPIFetcher.js in page world)
+    const div = document.getElementById('video-drive-data');
+    if (!div) return null;
+    try {
+      const data = JSON.parse(div.getAttribute('data-drive-item') || '{}');
+      if (data.driveId && data.itemId) return data;
+    } catch (e) {}
+    return null;
+  };
+
+  const handleDirectVideoDownload = async () => {
+    // Tier 1: Use pre-authenticated download URL if already captured by page-world script
+    const driveItem = getVideoDriveItem();
+    if (driveItem && driveItem.downloadUrl) {
+      const filename = driveItem.fileName || 'recording.mp4';
+      const sizeMB = driveItem.fileSize ? Math.round(driveItem.fileSize / 1024 / 1024) : '?';
+      console.log(`[Teams Chat Extractor] Direct video download: ${filename} (${sizeMB}MB)`);
+      window.open(driveItem.downloadUrl, '_blank');
+      return;
+    }
+
+    // Tier 2: Use download.aspx with the file path from URL (cookie-based, most reliable)
+    const urlParams = new URLSearchParams(window.location.search);
+    const filePath = urlParams.get('id');
+    if (filePath) {
+      const siteMatch = window.location.pathname.match(/^(\/personal\/[^/]+|\/sites\/[^/]+)/);
+      const siteBase = siteMatch ? siteMatch[0] : '';
+      const downloadUrl = `https://${window.location.hostname}${siteBase}/_layouts/15/download.aspx?SourceUrl=${encodeURIComponent(filePath)}`;
+      console.log('[Teams Chat Extractor] Video download via download.aspx');
+      window.open(downloadUrl, '_blank');
+      return;
+    }
+
+    // Tier 3: Discover drive item from performance entries, then fetch download URL
+    if (driveItem && driveItem.apiBase) {
+      // Ask page world to fetch the download URL via CustomEvent
+      document.dispatchEvent(new CustomEvent('tceRequestVideoDownloadUrl', {
+        detail: { apiBase: driveItem.apiBase }
+      }));
+      // Wait briefly for response
+      const waitResult = await new Promise((resolve) => {
+        const handler = (e) => {
+          document.removeEventListener('tceVideoDownloadUrlReady', handler);
+          resolve(e.detail);
+        };
+        document.addEventListener('tceVideoDownloadUrlReady', handler);
+        setTimeout(() => { document.removeEventListener('tceVideoDownloadUrlReady', handler); resolve(null); }, 5000);
+      });
+      if (waitResult && waitResult.downloadUrl) {
+        window.open(waitResult.downloadUrl, '_blank');
+        return;
+      }
+    }
+
+    // Tier 4: Fall back to MSE capture panel
+    console.log('[Teams Chat Extractor] No direct download available, opening capture panel');
+    setupVideoDownloadPanel();
+  };
 
   const setupVideoDownloadPanel = () => {
     if (videoDownloadPanelOpen || document.getElementById('video-download-panel')) {

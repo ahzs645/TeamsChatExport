@@ -13,7 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Load current chat name from content script
   const loadCurrentState = () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-      if (tabs[0] && tabs[0].url.includes('teams.microsoft.com')) {
+      if (tabs[0] && (tabs[0].url.includes('teams.microsoft.com') || tabs[0].url.includes('teams.cloud.microsoft') || tabs[0].url.includes('sharepoint.com'))) {
         chrome.tabs.sendMessage(tabs[0].id, {action: 'getState'}, (response) => {
           if (chrome.runtime.lastError) {
             currentChatEl.textContent = 'Connect to Teams first';
@@ -32,13 +32,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Extract active chat
   extractActiveChatBtn.addEventListener('click', () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-      if (tabs[0] && tabs[0].url.includes("teams.microsoft.com")) {
+      if (tabs[0] && (tabs[0].url.includes("teams.microsoft.com") || tabs[0].url.includes("teams.cloud.microsoft"))) {
         extractActiveChatBtn.textContent = "Extracting...";
         extractActiveChatBtn.disabled = true;
         chrome.tabs.sendMessage(tabs[0].id, {action: "extractActiveChat"});
         setTimeout(() => window.close(), 500);
       } else {
-        alert("Please navigate to teams.microsoft.com to use this extension.");
+        alert("Please navigate to Teams to use this extension.");
       }
     });
   });
@@ -56,7 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Check transcript status
   const loadTranscriptState = () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-      if (tabs[0] && (tabs[0].url.includes('teams.microsoft.com') || tabs[0].url.includes('stream.aspx'))) {
+      if (tabs[0] && (tabs[0].url.includes('teams.microsoft.com') || tabs[0].url.includes('teams.cloud.microsoft') || tabs[0].url.includes('sharepoint.com') || tabs[0].url.includes('stream.aspx'))) {
         chrome.tabs.sendMessage(tabs[0].id, {action: 'getTranscriptStatus'}, (response) => {
           if (chrome.runtime.lastError) {
             transcriptSection.style.display = 'none';
@@ -158,13 +158,69 @@ document.addEventListener('DOMContentLoaded', () => {
   // Batch transcript button - sends message to open the batch panel on the page
   batchTranscriptBtn.addEventListener('click', () => {
     chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
-      if (tabs[0] && tabs[0].url.includes('teams.microsoft.com')) {
+      if (tabs[0] && (tabs[0].url.includes('teams.microsoft.com') || tabs[0].url.includes('teams.cloud.microsoft') || tabs[0].url.includes('sharepoint.com'))) {
         chrome.tabs.sendMessage(tabs[0].id, {action: 'startBatchTranscript'});
         batchTranscriptBtn.textContent = 'Running...';
         batchTranscriptBtn.disabled = true;
         setTimeout(() => window.close(), 500);
       } else {
         alert('Please navigate to a Teams Recap page to use batch download.');
+      }
+    });
+  });
+
+  // Video download section
+  const downloadVideoBtn = document.getElementById('downloadVideoBtn');
+  const videoMethodBtns = document.getElementById('videoMethodBtns');
+
+  // Load available video download methods
+  const loadVideoMethods = () => {
+    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+      if (!tabs[0]) return;
+      chrome.tabs.sendMessage(tabs[0].id, {action: 'getVideoModules'}, (response) => {
+        if (chrome.runtime.lastError || !response?.modules) return;
+        videoMethodBtns.innerHTML = '';
+        for (const mod of response.modules) {
+          const btn = document.createElement('button');
+          btn.textContent = mod.label;
+          btn.title = mod.description;
+          btn.disabled = !mod.available;
+          btn.style.cssText = 'flex:1;padding:5px 4px;font-size:10px;border:1px solid #ccc;border-radius:4px;cursor:pointer;background:' + (mod.available ? '#fff' : '#eee') + ';color:' + (mod.available ? '#333' : '#999');
+          btn.addEventListener('click', () => {
+            btn.textContent = 'Starting...';
+            btn.disabled = true;
+            chrome.tabs.sendMessage(tabs[0].id, {action: 'downloadVideo', data: {method: mod.name}}, () => {
+              setTimeout(() => window.close(), 500);
+            });
+          });
+          videoMethodBtns.appendChild(btn);
+        }
+      });
+    });
+  };
+
+  // Auto download - tries methods in priority order
+  downloadVideoBtn.addEventListener('click', () => {
+    chrome.tabs.query({active: true, currentWindow: true}, (tabs) => {
+      if (tabs[0]) {
+        downloadVideoBtn.textContent = 'Downloading...';
+        downloadVideoBtn.disabled = true;
+        chrome.tabs.sendMessage(tabs[0].id, {action: 'downloadVideo'}, (response) => {
+          if (chrome.runtime.lastError) {
+            alert('Could not connect to page. Make sure you are on a Teams recording or Stream page.');
+            downloadVideoBtn.textContent = 'Download Video (Auto)';
+            downloadVideoBtn.disabled = false;
+            return;
+          }
+          if (response?.success) {
+            downloadVideoBtn.textContent = 'Download started!';
+            setTimeout(() => window.close(), 1000);
+          } else if (response?.error) {
+            alert(response.error);
+            downloadVideoBtn.textContent = 'Download Video (Auto)';
+            downloadVideoBtn.disabled = false;
+          }
+        });
       }
     });
   });
@@ -249,12 +305,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize
   loadCurrentState();
   loadTranscriptState();
+  loadVideoMethods();
   loadSettings();
 
   // Refresh state every 2 seconds
   const stateRefreshInterval = setInterval(() => {
     loadCurrentState();
     loadTranscriptState();
+    loadVideoMethods();
   }, 2000);
   window.addEventListener('beforeunload', () => clearInterval(stateRefreshInterval));
 });

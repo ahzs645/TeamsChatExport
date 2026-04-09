@@ -123,9 +123,79 @@
 		div.setAttribute('data-updated', Date.now().toString());
 	};
 
-	// Patch Response.prototype.json to intercept readcollabobject AND cdnmedia/transcripts
+	// === Video Drive Item Capture ===
+	// Captures driveId and itemId from v2.1/drives/.../items/... API calls
+	// so we can later request @content.downloadUrl for direct video download.
+	window.__videoDriveItem = window.__videoDriveItem || {};
+	const VIDEO_DRIVE_DIV_ID = 'video-drive-data';
+
+	const updateVideoDriveDiv = () => {
+		let div = document.getElementById(VIDEO_DRIVE_DIV_ID);
+		if (!div) {
+			div = document.createElement('div');
+			div.id = VIDEO_DRIVE_DIV_ID;
+			div.style.display = 'none';
+			document.body.appendChild(div);
+		}
+		div.setAttribute('data-drive-item', JSON.stringify(window.__videoDriveItem));
+		div.setAttribute('data-updated', Date.now().toString());
+	};
+
+	const captureDriveItem = (url, responseData) => {
+		const match = url.match(/\/v2\.1\/drives\/([^/?]+)\/items\/([^/?]+)/);
+		if (!match) return;
+		const driveId = match[1];
+		const itemId = match[2];
+		const siteMatch = url.match(/^https?:\/\/[^/]+(\/personal\/[^/]+|\/sites\/[^/]+)/);
+		const siteBase = siteMatch ? siteMatch[1] : '';
+		const host = (() => { try { return new URL(url).hostname; } catch(e) { return ''; } })();
+		const apiBase = `https://${host}${siteBase}/_api/v2.1/drives/${driveId}/items/${itemId}`;
+
+		window.__videoDriveItem = {
+			driveId,
+			itemId,
+			siteBase,
+			host,
+			capturedAt: Date.now(),
+			apiBase,
+			// If the response already has @content.downloadUrl, capture it
+			downloadUrl: responseData?.['@content.downloadUrl'] || null,
+			fileName: responseData?.name || null,
+			fileSize: responseData?.size || null
+		};
+		updateVideoDriveDiv();
+		console.log(`[Teams Chat Exporter] Captured drive item: ${itemId} (${responseData?.name || 'unknown'})`);
+
+		// If we don't have the download URL yet, fetch it
+		if (!window.__videoDriveItem.downloadUrl) {
+			const token = window.__sharePointTokens?.[host]?.token;
+			if (token) {
+				fetch(apiBase, {
+					headers: { 'Authorization': token, 'Accept': 'application/json' }
+				}).then(r => r.json()).then(data => {
+					if (data['@content.downloadUrl']) {
+						window.__videoDriveItem.downloadUrl = data['@content.downloadUrl'];
+						window.__videoDriveItem.fileName = data.name || window.__videoDriveItem.fileName;
+						window.__videoDriveItem.fileSize = data.size || window.__videoDriveItem.fileSize;
+						updateVideoDriveDiv();
+						console.log(`[Teams Chat Exporter] Got download URL for ${data.name} (${Math.round((data.size || 0) / 1024 / 1024)}MB)`);
+					}
+				}).catch(() => {});
+			}
+		}
+	};
+
+	// Patch Response.prototype.json to intercept readcollabobject, cdnmedia/transcripts, and drive items
 	Response.prototype.json = function () {
 		const responseUrl = this.url || '';
+
+		// Capture drive item IDs for direct video download
+		if (responseUrl.includes('/v2.1/drives/') && responseUrl.includes('/items/')) {
+			const cloned2 = this.clone();
+			origJson.call(cloned2).then((data) => {
+				try { captureDriveItem(responseUrl, data); } catch (e) {}
+			}).catch(() => { captureDriveItem(responseUrl, null); });
+		}
 
 		if (responseUrl.includes('readcollabobject')) {
 			const cloned = this.clone();
@@ -232,6 +302,64 @@
 			};
 			updateHiddenDiv();
 			console.log(`[Teams Chat Exporter] Received SharePoint token for ${host} (via webRequest)`);
+		}
+	});
+
+	// === Fresh video download URL request ===
+	// Content script dispatches 'tceRequestFreshVideoUrl', page world fetches and replies.
+	document.addEventListener('tceRequestFreshVideoUrl', async () => {
+		const driveItem = window.__videoDriveItem;
+		if (!driveItem || !driveItem.apiBase) {
+			document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+				detail: { error: 'No drive item data available' }
+			}));
+			return;
+		}
+
+		const token = window.__sharePointTokens?.[driveItem.host]?.token;
+		if (!token) {
+			document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+				detail: { error: 'No auth token available' }
+			}));
+			return;
+		}
+
+		try {
+			const resp = await fetch(driveItem.apiBase, {
+				headers: { 'Authorization': token, 'Accept': 'application/json' }
+			});
+			if (!resp.ok) {
+				document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+					detail: { error: `API returned ${resp.status}` }
+				}));
+				return;
+			}
+			const data = await resp.json();
+			const downloadUrl = data['@content.downloadUrl'];
+			if (downloadUrl) {
+				// Also update the cached data
+				driveItem.downloadUrl = downloadUrl;
+				driveItem.fileName = data.name || driveItem.fileName;
+				driveItem.fileSize = data.size || driveItem.fileSize;
+				updateVideoDriveDiv();
+
+				document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+					detail: {
+						downloadUrl,
+						fileName: data.name,
+						fileSize: data.size
+					}
+				}));
+				console.log(`[Teams Chat Exporter] Fresh download URL obtained for ${data.name}`);
+			} else {
+				document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+					detail: { error: 'No download URL in API response' }
+				}));
+			}
+		} catch (e) {
+			document.dispatchEvent(new CustomEvent('tceFreshVideoUrlReady', {
+				detail: { error: e.message }
+			}));
 		}
 	});
 
