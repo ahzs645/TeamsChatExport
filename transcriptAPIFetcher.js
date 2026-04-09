@@ -19,6 +19,7 @@
 	Response.prototype.__teamsChatExporterPatched = true;
 
 	const origJson = Response.prototype.json;
+	const origText = Response.prototype.text;
 	const HIDDEN_DIV_ID = 'transcript-api-data';
 
 	// Store all captured transcript metadata keyed by thread+calendarEvent
@@ -105,7 +106,24 @@
 		}
 	};
 
-	// Patch Response.prototype.json to intercept readcollabobject responses
+	// Store transcript content captured directly from cdnmedia/transcripts responses
+	window.__capturedTranscriptContent = window.__capturedTranscriptContent || {};
+
+	const TRANSCRIPT_DATA_DIV_ID = 'captured-transcript-content';
+
+	const updateTranscriptContentDiv = () => {
+		let div = document.getElementById(TRANSCRIPT_DATA_DIV_ID);
+		if (!div) {
+			div = document.createElement('div');
+			div.id = TRANSCRIPT_DATA_DIV_ID;
+			div.style.display = 'none';
+			document.body.appendChild(div);
+		}
+		div.setAttribute('data-transcripts', JSON.stringify(window.__capturedTranscriptContent));
+		div.setAttribute('data-updated', Date.now().toString());
+	};
+
+	// Patch Response.prototype.json to intercept readcollabobject AND cdnmedia/transcripts
 	Response.prototype.json = function () {
 		const responseUrl = this.url || '';
 
@@ -120,7 +138,85 @@
 			}).catch(() => {});
 		}
 
+		// Intercept Stream player's transcript fetch (cdnmedia/transcripts)
+		if (responseUrl.includes('cdnmedia/transcripts') || responseUrl.includes('/transcripts')) {
+			const cloned = this.clone();
+			origJson.call(cloned).then((data) => {
+				try {
+					if (data && (Array.isArray(data) || data.entries || data.captions || data.value)) {
+						const entries = Array.isArray(data) ? data : (data.entries || data.captions || data.value || []);
+						if (entries.length > 0) {
+							const key = `stream-${Date.now()}`;
+							window.__capturedTranscriptContent[key] = {
+								entries,
+								capturedAt: new Date().toISOString(),
+								source: 'cdnmedia',
+								entryCount: entries.length,
+								url: responseUrl.split('?')[0]
+							};
+							updateTranscriptContentDiv();
+							console.log(`[Teams Chat Exporter] Captured ${entries.length} transcript entries from cdnmedia/transcripts`);
+						}
+					}
+				} catch (e) {
+					console.error('[Teams Chat Exporter] Error capturing transcript content:', e);
+				}
+			}).catch(() => {});
+		}
+
 		return origJson.call(this);
+	};
+
+	// Also patch Response.prototype.text to catch transcript responses read as text (e.g. VTT)
+	Response.prototype.text = function () {
+		const responseUrl = this.url || '';
+
+		if (responseUrl.includes('cdnmedia/transcripts') || responseUrl.includes('/transcripts')) {
+			const cloned = this.clone();
+			origText.call(cloned).then((text) => {
+				try {
+					if (!text || text.length < 10) return;
+
+					let entries = [];
+					// Try parsing as JSON first
+					if (text.startsWith('{') || text.startsWith('[')) {
+						try {
+							const data = JSON.parse(text);
+							entries = Array.isArray(data) ? data : (data.entries || data.captions || data.value || []);
+						} catch (e) {}
+					}
+
+					// If we got entries from JSON, or if it's VTT format, store it
+					const key = `stream-${Date.now()}`;
+					if (entries.length > 0) {
+						window.__capturedTranscriptContent[key] = {
+							entries,
+							capturedAt: new Date().toISOString(),
+							source: 'cdnmedia-json',
+							entryCount: entries.length,
+							url: responseUrl.split('?')[0]
+						};
+					} else if (text.startsWith('WEBVTT')) {
+						window.__capturedTranscriptContent[key] = {
+							rawVtt: text,
+							capturedAt: new Date().toISOString(),
+							source: 'cdnmedia-vtt',
+							entryCount: (text.match(/-->/g) || []).length,
+							url: responseUrl.split('?')[0]
+						};
+					}
+
+					if (window.__capturedTranscriptContent[key]) {
+						updateTranscriptContentDiv();
+						console.log(`[Teams Chat Exporter] Captured transcript via .text() (${window.__capturedTranscriptContent[key].source}, ${window.__capturedTranscriptContent[key].entryCount} entries)`);
+					}
+				} catch (e) {
+					console.error('[Teams Chat Exporter] Error capturing transcript text:', e);
+				}
+			}).catch(() => {});
+		}
+
+		return origText.call(this);
 	};
 
 	// === Receive SharePoint tokens from background.js via content script ===

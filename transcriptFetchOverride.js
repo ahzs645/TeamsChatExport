@@ -64,8 +64,79 @@
 		return hhmmss;
 	};
 
-	// Extract transcript entries from DOM (for newer Stream/SharePoint)
+	// Convert ISO 8601 duration (PT1H23M17S) to HH:MM:SS
+	const parsePTDuration = (pt) => {
+		if (!pt || typeof pt !== 'string') return '00:00:00';
+		const h = pt.match(/(\d+)H/i);
+		const m = pt.match(/(\d+)M/i);
+		const s = pt.match(/(\d+)S/i);
+		const hours = h ? parseInt(h[1], 10) : 0;
+		const mins = m ? parseInt(m[1], 10) : 0;
+		const secs = s ? parseInt(s[1], 10) : 0;
+		return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+	};
+
+	// Extract complete transcript from React fiber state (all entries, not just visible)
+	const extractFromReactState = () => {
+		// Try multiple starting elements - the data lives deep in the tree
+		// and the scroll container class name changes between page loads
+		const startElements = [
+			document.querySelector('.ms-List'),
+			document.querySelector('[role="list"]'),
+			document.querySelector('[role="group"]'),
+			document.querySelector('.focusZoneWithAutoScroll-309'),
+			document.querySelector('[aria-label="Transcript"]'),
+			...Array.from(document.querySelectorAll('[class*="focusZone" i]')).slice(0, 3)
+		].filter(Boolean);
+
+		const visited = new WeakSet();
+
+		for (const startEl of startElements) {
+			const fiberKey = Object.keys(startEl).find(k => k.startsWith('__reactFiber'));
+			if (!fiberKey) continue;
+
+			let fiber = startEl[fiberKey];
+			let depth = 0;
+			while (fiber && depth < 50) {
+				if (visited.has(fiber)) { fiber = fiber.return; depth++; continue; }
+				visited.add(fiber);
+
+				let hookState = fiber.memoizedState;
+				let hookIdx = 0;
+				while (hookState && hookIdx < 30) {
+					const mem = hookState.memoizedState;
+					if (Array.isArray(mem) && mem.length > 0) {
+						const sample = mem[0];
+						if (sample && sample.speakerDisplayName !== undefined && sample.text !== undefined && sample.timestamp !== undefined) {
+							return mem.map((entry, index) => ({
+								startOffset: parsePTDuration(entry.timestamp),
+								endOffset: parsePTDuration(entry.timestamp),
+								speakerDisplayName: entry.speakerDisplayName || 'Unknown',
+								text: entry.text || '',
+								id: entry.entryId || `react-${index + 1}`
+							})).filter(e => e.text.trim());
+						}
+					}
+					hookState = hookState.next;
+					hookIdx++;
+				}
+				fiber = fiber.return;
+				depth++;
+			}
+		}
+		return null;
+	};
+
+	// Extract transcript entries from DOM (fallback for visible entries only)
 	const extractFromDOM = () => {
+		// Try React state first for complete transcript
+		const reactEntries = extractFromReactState();
+		if (reactEntries && reactEntries.length > 0) {
+			console.log(`[Teams Chat Exporter] Extracted ${reactEntries.length} entries from React state (complete)`);
+			return reactEntries;
+		}
+
+		// Fallback: DOM extraction (visible entries only)
 		const entries = [];
 		const groups = document.querySelectorAll('[role="group"]');
 
@@ -245,9 +316,11 @@
 	// Expose utilities for batch transcript download
 	window.__teamsTranscriptUtils = {
 		extractFromDOM,
+		extractFromReactState,
 		buildVttTranscript,
 		buildTxtTranscript,
 		parseTimestampFromLabel,
+		parsePTDuration,
 		timestampToSeconds,
 		toSimpleTimestamp,
 		storeTranscript,

@@ -442,13 +442,28 @@ const isTeamsPage = () => {
     }
   };
 
-  // Try API-based fetch first (complete transcript), fall back to DOM (visible only)
+  // Get captured transcript content from cdnmedia/transcripts intercept
+  const getCapturedTranscriptContent = () => {
+    if (window.__capturedTranscriptContent && Object.keys(window.__capturedTranscriptContent).length > 0) {
+      return { ...window.__capturedTranscriptContent };
+    }
+    const div = document.getElementById('captured-transcript-content');
+    if (!div) return {};
+    try {
+      return JSON.parse(div.getAttribute('data-transcripts') || '{}');
+    } catch (e) {
+      return {};
+    }
+  };
+
+  // Priority: 1) API metadata fetch, 2) captured cdnmedia response, 3) React state, 4) DOM
   const getTranscriptData = async () => {
-    // Try API approach first - gets complete transcript from SharePoint
+    const utils = window.__teamsTranscriptUtils;
+
+    // 1. Try API approach via readcollabobject metadata - batch downloader path
     const allMeta = getAPIMetadata();
     const metaKeys = Object.keys(allMeta);
     if (metaKeys.length > 0) {
-      // Use the most recent metadata entry
       const latestKey = metaKeys[metaKeys.length - 1];
       const apiResult = await fetchTranscriptViaAPI(allMeta[latestKey]);
       if (apiResult) {
@@ -457,14 +472,66 @@ const isTeamsPage = () => {
       }
     }
 
-    // Fall back to DOM extraction (visible entries only)
+    // 2. Try captured cdnmedia/transcripts response (intercepted at page load)
+    const captured = getCapturedTranscriptContent();
+    const capturedKeys = Object.keys(captured);
+    if (capturedKeys.length > 0) {
+      const latest = captured[capturedKeys[capturedKeys.length - 1]];
+
+      // Case A: raw VTT captured directly
+      if (latest && latest.rawVtt) {
+        console.log(`[Teams Chat Extractor] Using captured cdnmedia VTT (${latest.entryCount} entries, complete)`);
+        return {
+          vtt: latest.rawVtt,
+          txt: convertVttToTxt(latest.rawVtt),
+          source: 'cdnmedia-vtt'
+        };
+      }
+
+      // Case B: JSON entries captured
+      if (latest && latest.entries && latest.entries.length > 0 && utils) {
+        const entries = latest.entries.map((e, i) => ({
+          startOffset: e.startOffset || e.offset || (utils.parsePTDuration ? utils.parsePTDuration(e.timestamp) : '00:00:00'),
+          endOffset: e.endOffset || e.startOffset || '00:00:00',
+          speakerDisplayName: e.speakerDisplayName || e.speaker || 'Unknown',
+          text: e.text || e.content || '',
+          id: e.entryId || `captured-${i + 1}`
+        })).filter(e => e.text.trim());
+
+        if (entries.length > 0) {
+          console.log(`[Teams Chat Extractor] Using captured cdnmedia transcript (${entries.length} entries, complete)`);
+          return {
+            vtt: utils.buildVttTranscript(entries),
+            txt: utils.buildTxtTranscript(entries),
+            source: 'cdnmedia'
+          };
+        }
+      }
+    }
+
+    // 3. Try React state extraction - gets all entries from virtualized list
+    if (utils && utils.extractFromReactState) {
+      const reactEntries = utils.extractFromReactState();
+      if (reactEntries && reactEntries.length > 0) {
+        console.log(`[Teams Chat Extractor] Using React state transcript (${reactEntries.length} entries, complete)`);
+        return {
+          vtt: utils.buildVttTranscript(reactEntries),
+          txt: utils.buildTxtTranscript(reactEntries),
+          source: 'react'
+        };
+      }
+    }
+
+    // 4. Fall back to DOM hidden div (populated by transcriptFetchOverride.js which uses React state)
     const container = document.getElementById('teams-chat-exporter-transcript-data');
     if (!container) return null;
-    console.log('[Teams Chat Extractor] Falling back to DOM transcript (visible only)');
+    const entryCount = container.getAttribute('data-count') || '?';
+    const dataSource = container.getAttribute('data-source') || 'unknown';
+    console.log(`[Teams Chat Extractor] Using transcript from hidden div (${entryCount} entries, source: ${dataSource})`);
     return {
       vtt: container.getAttribute('data-vtt') || container.textContent,
       txt: container.getAttribute('data-txt') || container.textContent,
-      source: 'dom'
+      source: dataSource
     };
   };
 
