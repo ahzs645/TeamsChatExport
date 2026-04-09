@@ -392,8 +392,248 @@
     return output;
   };
 
+  /**
+   * Extract track info from fMP4 data without building the full output.
+   * Returns: { ftyp, initMoov, samples, mdatChunks, totalMediaSize, stsdData, hdlrData, tkhdData, mdhdData, handlerType, timescale }
+   */
+  const extractTrackInfo = (fmp4Data, timescale, segmentDurationMs) => {
+    const data = fmp4Data;
+    const total = data.length;
+    const ftyp = findBox(data, 'ftyp', 0);
+    const initMoov = findBox(data, 'moov', 0);
+    if (!ftyp || !initMoov) throw new Error('Missing ftyp or moov');
+
+    const initMoovData = data.slice(initMoov.offset, initMoov.offset + initMoov.size);
+    const trak = findBox(initMoovData, 'trak', 8);
+    const mdia = trak ? findBoxIn(initMoovData, trak.offset, trak.size, 'mdia') : null;
+    const minf = mdia ? findBoxIn(initMoovData, mdia.offset, mdia.size, 'minf') : null;
+    const stbl = minf ? findBoxIn(initMoovData, minf.offset, minf.size, 'stbl') : null;
+    const stsd = stbl ? findBoxIn(initMoovData, stbl.offset, stbl.size, 'stsd') : null;
+    if (!stsd) throw new Error('No stsd found');
+
+    const stsdData = initMoovData.slice(stsd.offset, stsd.offset + stsd.size);
+    const hdlr = mdia ? findBoxIn(initMoovData, mdia.offset, mdia.size, 'hdlr') : null;
+    let handlerType = 'vide';
+    if (hdlr) handlerType = String.fromCharCode(initMoovData[hdlr.offset+16], initMoovData[hdlr.offset+17], initMoovData[hdlr.offset+18], initMoovData[hdlr.offset+19]);
+    const hdlrData = hdlr ? initMoovData.slice(hdlr.offset, hdlr.offset + hdlr.size) : null;
+    const tkhd = trak ? findBoxIn(initMoovData, trak.offset, trak.size, 'tkhd') : null;
+    const tkhdData = tkhd ? initMoovData.slice(tkhd.offset, tkhd.offset + tkhd.size) : null;
+    const mdhdBox = mdia ? findBoxIn(initMoovData, mdia.offset, mdia.size, 'mdhd') : null;
+    const mdhdData = mdhdBox ? initMoovData.slice(mdhdBox.offset, mdhdBox.offset + mdhdBox.size) : null;
+
+    const segDurationTs = Math.round(segmentDurationMs / 1000 * timescale);
+    const samples = [];
+    const mdatChunks = [];
+    let totalMediaSize = 0;
+    let pos = initMoov.offset + initMoov.size;
+
+    while (pos < total - 8) {
+      const size = readU32(data, pos);
+      const type = boxType(data, pos);
+      if (size < 8) break;
+      if (type === 'moof') {
+        let inner = pos + 8;
+        while (inner < pos + size - 8) {
+          const iSize = readU32(data, inner);
+          if (iSize < 8) break;
+          if (boxType(data, inner) === 'traf') {
+            let tp = inner + 8;
+            while (tp < inner + iSize - 8) {
+              const tSize = readU32(data, tp);
+              if (tSize < 8) break;
+              if (boxType(data, tp) === 'trun') {
+                const fl = (data[tp+9]<<16)|(data[tp+10]<<8)|data[tp+11];
+                const sc = readU32(data, tp+12);
+                const perSampleDur = sc > 0 ? Math.round(segDurationTs / sc) : 1;
+                let o = 16;
+                if (fl & 0x1) o += 4;
+                if (fl & 0x4) o += 4;
+                for (let s = 0; s < sc; s++) {
+                  if (fl & 0x100) o += 4;
+                  const sz = (fl & 0x200) ? readU32(data, tp + o) : 0;
+                  if (fl & 0x200) o += 4;
+                  if (fl & 0x400) o += 4;
+                  if (fl & 0x800) o += 4;
+                  samples.push({ size: sz, duration: perSampleDur });
+                }
+              }
+              tp += tSize;
+            }
+          }
+          inner += iSize;
+        }
+      }
+      if (type === 'mdat') {
+        mdatChunks.push(data.slice(pos + 8, pos + size));
+        totalMediaSize += size - 8;
+      }
+      pos += size;
+    }
+
+    return {
+      ftypData: data.slice(ftyp.offset, ftyp.offset + ftyp.size),
+      samples, mdatChunks, totalMediaSize,
+      stsdData, hdlrData, tkhdData, mdhdData, handlerType, timescale
+    };
+  };
+
+  /**
+   * Build a trak box from track info.
+   */
+  const buildTrak = (trackId, info, mdatDataOffset) => {
+    const { samples, stsdData, hdlrData, tkhdData, mdhdData, handlerType, timescale } = info;
+    const totalDuration = samples.reduce((sum, s) => sum + s.duration, 0);
+
+    // stts
+    const sttsRuns = [];
+    let curDur = samples[0]?.duration || 1, curCount = 1;
+    for (let i = 1; i < samples.length; i++) {
+      if (samples[i].duration === curDur) curCount++;
+      else { sttsRuns.push({ count: curCount, duration: curDur }); curDur = samples[i].duration; curCount = 1; }
+    }
+    if (samples.length > 0) sttsRuns.push({ count: curCount, duration: curDur });
+    const sttsP = new Uint8Array(4 + sttsRuns.length * 8);
+    writeU32(sttsP, 0, sttsRuns.length);
+    for (let i = 0; i < sttsRuns.length; i++) { writeU32(sttsP, 4+i*8, sttsRuns[i].count); writeU32(sttsP, 8+i*8, sttsRuns[i].duration); }
+    const stts = makeFullBox('stts', 0, 0, sttsP);
+
+    // stsz
+    const stszP = new Uint8Array(8 + samples.length * 4);
+    writeU32(stszP, 4, samples.length);
+    for (let i = 0; i < samples.length; i++) writeU32(stszP, 8+i*4, samples[i].size);
+    const stsz = makeFullBox('stsz', 0, 0, stszP);
+
+    // stsc
+    const stscP = new Uint8Array(16);
+    writeU32(stscP, 0, 1);
+    writeU32(stscP, 4, 1);
+    writeU32(stscP, 8, samples.length);
+    writeU32(stscP, 12, 1);
+    const stsc = makeFullBox('stsc', 0, 0, stscP);
+
+    // co64 (placeholder - will be fixed later)
+    const co64P = new Uint8Array(12);
+    writeU32(co64P, 0, 1);
+    writeU32(co64P, 8, mdatDataOffset); // low 32 bits
+    const co64 = makeFullBox('co64', 0, 0, co64P);
+
+    const stbl = makeBox('stbl', stsdData, stts, stsc, stsz, co64);
+    const mh = handlerType === 'vide'
+      ? makeFullBox('vmhd', 0, 1, new Uint8Array(8))
+      : makeFullBox('smhd', 0, 0, new Uint8Array(4));
+    const drefEntry = new Uint8Array(16);
+    writeU32(drefEntry, 0, 1); writeU32(drefEntry, 4, 12);
+    drefEntry[8]=0x75;drefEntry[9]=0x72;drefEntry[10]=0x6c;drefEntry[11]=0x20;drefEntry[15]=1;
+    const dinf = makeBox('dinf', makeFullBox('dref', 0, 0, drefEntry));
+    const minf = makeBox('minf', mh, dinf, stbl);
+
+    let mdhd;
+    if (mdhdData) {
+      mdhd = new Uint8Array(mdhdData);
+      const ver = mdhd[8];
+      if (ver === 0) writeU32(mdhd, 24, totalDuration);
+      else { writeU32(mdhd, 32, 0); writeU32(mdhd, 36, totalDuration); }
+    } else {
+      const p = new Uint8Array(20);
+      writeU32(p, 8, timescale); writeU32(p, 12, totalDuration); writeU16(p, 16, 0x55C4);
+      mdhd = makeFullBox('mdhd', 0, 0, p);
+    }
+    const hdlr = hdlrData || makeFullBox('hdlr', 0, 0, new Uint8Array(21));
+    const mdia = makeBox('mdia', mdhd, hdlr, minf);
+
+    let tkhd;
+    if (tkhdData) {
+      tkhd = new Uint8Array(tkhdData);
+      // Fix track ID
+      const ver = tkhd[8];
+      if (ver === 0) { writeU32(tkhd, 20, trackId); writeU32(tkhd, 28, Math.round(totalDuration/timescale*1000)); }
+      else { writeU32(tkhd, 28, trackId); writeU32(tkhd, 36, 0); writeU32(tkhd, 40, Math.round(totalDuration/timescale*1000)); }
+    } else {
+      const p = new Uint8Array(80);
+      writeU32(p, 12, trackId);
+      writeU32(p, 20, Math.round(totalDuration/timescale*1000));
+      tkhd = makeFullBox('tkhd', 0, 3, p);
+    }
+
+    return { trak: makeBox('trak', tkhd, mdia), totalDuration, timescale };
+  };
+
+  /**
+   * Convert and merge video + audio fMP4 into a single standard MP4.
+   * @param {Uint8Array} videoData - Video fMP4 data (with timestamps already fixed)
+   * @param {number} videoTimescale
+   * @param {Uint8Array} audioData - Audio fMP4 data (with timestamps already fixed)
+   * @param {number} audioTimescale
+   * @param {number} segmentDurationMs
+   * @returns {Uint8Array} Combined standard MP4
+   */
+  const convertAndMerge = (videoData, videoTimescale, audioData, audioTimescale, segmentDurationMs) => {
+    const vInfo = extractTrackInfo(videoData, videoTimescale, segmentDurationMs);
+    const aInfo = extractTrackInfo(audioData, audioTimescale, segmentDurationMs);
+
+    // Combine mdat from both tracks
+    const totalMdatSize = 8 + vInfo.totalMediaSize + aInfo.totalMediaSize;
+    const videoMdatOffset = 0; // placeholder, fixed after moov is built
+    const audioMdatOffset = 0;
+
+    // Build tracks (offsets are placeholders)
+    const vTrack = buildTrak(1, vInfo, 0);
+    const aTrack = buildTrak(2, aInfo, 0);
+
+    // Build mvhd
+    const movieDuration = Math.max(
+      Math.round(vTrack.totalDuration / vTrack.timescale * 1000),
+      Math.round(aTrack.totalDuration / aTrack.timescale * 1000)
+    );
+    const mvhdP = new Uint8Array(96);
+    writeU32(mvhdP, 8, 1000);
+    writeU32(mvhdP, 12, movieDuration);
+    writeU32(mvhdP, 16, 0x00010000);
+    writeU16(mvhdP, 20, 0x0100);
+    writeU32(mvhdP, 32, 0x00010000);
+    writeU32(mvhdP, 48, 0x00010000);
+    writeU32(mvhdP, 64, 0x40000000);
+    writeU32(mvhdP, 92, 3);
+    const mvhd = makeFullBox('mvhd', 0, 0, mvhdP);
+
+    const moov = makeBox('moov', mvhd, vTrack.trak, aTrack.trak);
+
+    // Calculate mdat offsets
+    const ftypData = vInfo.ftypData;
+    const mdatHeaderSize = 8;
+    const mdatStart = ftypData.length + moov.length + mdatHeaderSize;
+    const audioDataStart = mdatStart + vInfo.totalMediaSize;
+
+    // Fix co64 offsets in moov — find both co64 boxes
+    let co64Count = 0;
+    for (let i = 0; i < moov.length - 16; i++) {
+      if (moov[i+4]===0x63 && moov[i+5]===0x6f && moov[i+6]===0x36 && moov[i+7]===0x34) {
+        co64Count++;
+        const offset = co64Count === 1 ? mdatStart : audioDataStart;
+        writeU32(moov, i + 16, 0);
+        writeU32(moov, i + 20, offset);
+      }
+    }
+
+    // Assemble output
+    const mdatHeader = new Uint8Array(8);
+    writeU32(mdatHeader, 0, totalMdatSize);
+    mdatHeader[4]=0x6d;mdatHeader[5]=0x64;mdatHeader[6]=0x61;mdatHeader[7]=0x74;
+
+    const outputSize = ftypData.length + moov.length + totalMdatSize;
+    const output = new Uint8Array(outputSize);
+    let p = 0;
+    output.set(ftypData, p); p += ftypData.length;
+    output.set(moov, p); p += moov.length;
+    output.set(mdatHeader, p); p += 8;
+    for (const c of vInfo.mdatChunks) { output.set(c, p); p += c.length; }
+    for (const c of aInfo.mdatChunks) { output.set(c, p); p += c.length; }
+
+    return output;
+  };
+
   // Expose
-  window.__fmp4ToMp4 = { convert };
+  window.__fmp4ToMp4 = { convert, convertAndMerge };
 
   console.log('[Teams Chat Exporter] fMP4 to MP4 converter loaded');
 })();
