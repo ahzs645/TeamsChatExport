@@ -262,51 +262,53 @@ const isTeamsPage = () => {
         return true;
 
       case 'downloadVideo':
-        // Inject a script into page world to call coordinator directly
+        // Write command to a hidden div, coordinator picks it up
         (() => {
           const method = request.data?.method || '';
-          const script = document.createElement('script');
-          script.textContent = `(async()=>{
-            const c=window.__videoDownloadCoordinator;
-            if(!c){document.title='ERROR:no coordinator';return;}
-            const r=await c.download((p)=>{document.title=p.message||p.stage||'downloading...'},'${method}'||undefined);
-            document.title='DONE:'+JSON.stringify(r).substring(0,100);
-          })();`;
-          document.head.appendChild(script);
-          script.remove();
+          let cmdDiv = document.getElementById('tce-video-cmd');
+          if (!cmdDiv) {
+            cmdDiv = document.createElement('div');
+            cmdDiv.id = 'tce-video-cmd';
+            cmdDiv.style.display = 'none';
+            document.body.appendChild(cmdDiv);
+          }
+          cmdDiv.setAttribute('data-command', 'download');
+          cmdDiv.setAttribute('data-method', method);
+          cmdDiv.setAttribute('data-timestamp', Date.now().toString());
           sendResponse({ status: 'download_started' });
         })();
         return true;
 
       case 'getVideoModules':
-        // Read modules from page world via injected script + hidden div
+        // Check available modules by reading hidden divs from page world
         (() => {
-          const resultDiv = document.createElement('div');
-          resultDiv.id = 'tce-video-modules-result';
-          resultDiv.style.display = 'none';
-          document.body.appendChild(resultDiv);
+          const hasCrypto = document.getElementById('video-crypto-data')?.getAttribute('data-ready') === '1';
+          const hasDrive = !!document.getElementById('video-drive-data');
+          const hasVideo = !!document.querySelector('video');
+          // If crypto key was captured, the video played and segment URLs should be available
+          const hasTemplates = hasCrypto;
 
-          const script = document.createElement('script');
-          script.textContent = `(()=>{
-            const c=window.__videoDownloadCoordinator;
-            const div=document.getElementById('tce-video-modules-result');
-            if(c&&div){div.setAttribute('data-result',JSON.stringify(c.getAvailableModules()));}
-            else if(div){div.setAttribute('data-result','[]');}
-          })();`;
-          document.head.appendChild(script);
-          script.remove();
-
-          // Read result from the div
-          setTimeout(() => {
-            try {
-              const result = JSON.parse(resultDiv.getAttribute('data-result') || '[]');
-              resultDiv.remove();
-              sendResponse({ modules: result });
-            } catch (e) {
-              resultDiv.remove();
-              sendResponse({ modules: [] });
+          const modules = [
+            {
+              name: 'directDownload',
+              label: 'Direct Download',
+              description: 'Download original MP4 (needs download permission)',
+              available: hasDrive
+            },
+            {
+              name: 'manifestDownload',
+              label: 'Fast Download',
+              description: 'Parallel fetch + decrypt (play video briefly first)',
+              available: hasTemplates
+            },
+            {
+              name: 'captureStreamDownload',
+              label: 'Record Stream',
+              description: 'Record video at high speed (keep tab in foreground)',
+              available: hasVideo
             }
-          }, 100);
+          ];
+          sendResponse({ modules });
         })();
         return true;
 

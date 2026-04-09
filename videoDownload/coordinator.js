@@ -153,5 +153,36 @@
     }));
   });
 
+  // === DOM-based command interface (for content script communication) ===
+  // Content script writes commands to a hidden div since inline scripts are blocked by CSP.
+  let lastCmdTimestamp = '0';
+  setInterval(() => {
+    const cmdDiv = document.getElementById('tce-video-cmd');
+    if (!cmdDiv) return;
+    const ts = cmdDiv.getAttribute('data-timestamp') || '0';
+    if (ts === lastCmdTimestamp) return;
+    lastCmdTimestamp = ts;
+
+    const command = cmdDiv.getAttribute('data-command');
+    const method = cmdDiv.getAttribute('data-method') || '';
+    cmdDiv.removeAttribute('data-command');
+
+    if (command === 'download') {
+      console.log('[VideoCoordinator] Download command received, method:', method || 'auto');
+      download(
+        (progress) => { document.title = progress.message || progress.stage || 'downloading...'; },
+        method || undefined
+      ).then((result) => {
+        document.title = 'DONE: ' + JSON.stringify(result).substring(0, 100);
+        console.log('[VideoCoordinator] Download result:', result);
+      }).catch((err) => {
+        document.title = 'ERROR: ' + err.message;
+        console.error('[VideoCoordinator] Download error:', err);
+      });
+    } else if (command === 'stop') {
+      stop();
+    }
+  }, 500);
+
   console.log('[Teams Chat Exporter] Video download coordinator loaded');
 })();

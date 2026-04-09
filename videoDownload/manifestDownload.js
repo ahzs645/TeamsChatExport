@@ -213,7 +213,7 @@
           if (iType === 'traf') {
             let tp = inner + 8;
             const trafEnd = inner + iSize;
-            let segSamples = 0, segSampleDur = 0;
+            let segSamples = 0, segSampleDur = 0, defaultDuration = 0;
 
             while (tp < trafEnd - 8) {
               const tSize = readU32(tp);
@@ -230,23 +230,35 @@
                 fixed++;
               }
 
+              if (tType === 'tfhd') {
+                // Check for default_sample_duration (flag 0x8)
+                const tfhdFlags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
+                let tfhdOff = 16; // skip box header(8) + version+flags(4) + trackId(4)
+                if (tfhdFlags & 0x1) tfhdOff += 8;  // base_data_offset
+                if (tfhdFlags & 0x2) tfhdOff += 4;  // sample_description_index
+                if (tfhdFlags & 0x8) {               // default_sample_duration
+                  defaultDuration = readU32(tp + tfhdOff);
+                }
+              }
+
               if (tType === 'trun') {
-                const flags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
+                const trunFlags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
                 segSamples = readU32(tp + 12);
-                let offset = 16;
-                if (flags & 0x1) offset += 4; // data offset
-                if (flags & 0x4) offset += 4; // first sample flags
-                if (flags & 0x100) { // sample duration present
-                  segSampleDur = readU32(tp + offset);
+                let trunOff = 16;
+                if (trunFlags & 0x1) trunOff += 4; // data offset
+                if (trunFlags & 0x4) trunOff += 4; // first sample flags
+                if (trunFlags & 0x100) {             // per-sample duration
+                  segSampleDur = readU32(tp + trunOff);
                 }
               }
 
               tp += tSize;
             }
 
-            // Advance current time by this segment's duration
-            if (segSamples > 0 && segSampleDur > 0) {
-              lastSegDuration = segSamples * segSampleDur;
+            // Use per-sample duration from trun, or default from tfhd
+            const effectiveDuration = segSampleDur || defaultDuration;
+            if (segSamples > 0 && effectiveDuration > 0) {
+              lastSegDuration = segSamples * effectiveDuration;
             }
             currentTime += lastSegDuration;
           }
@@ -336,15 +348,41 @@
     const aMB = Math.round(aBlob.size / 1024 / 1024);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-    // Download both files
-    triggerDownload(vBlob, fileName + '-video.mp4');
-    setTimeout(() => triggerDownload(aBlob, fileName + '-audio.mp4'), 500);
+    // Show save buttons (large blob downloads need user gesture)
+    const panel = document.createElement('div');
+    panel.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99999;padding:16px 24px;background:rgba(0,0,0,0.92);color:white;border-radius:10px;font-family:monospace;font-size:13px;min-width:500px;text-align:center;';
+    panel.innerHTML = `<div>Done in ${elapsed}s! ${fixedVideo.fixed} segments, timestamps fixed.</div>` +
+      `<div style="margin:6px 0;font-size:11px;color:#aaa;">Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy combined.mp4</div>` +
+      `<div style="margin-top:10px;display:flex;gap:8px;justify-content:center;"></div>`;
+    const btnRow = panel.lastElementChild;
 
-    if (onProgress) onProgress({
-      stage: 'done',
-      message: `Done in ${elapsed}s! Video: ${vMB}MB, Audio: ${aMB}MB (${fixedVideo.fixed} segments fixed). Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy combined.mp4`,
-      percent: 100
-    });
+    const makeSaveBtn = (text, blob, fn, color) => {
+      const btn = document.createElement('button');
+      btn.textContent = text;
+      btn.style.cssText = `padding:10px 20px;font-size:14px;background:${color};color:white;border:none;border-radius:6px;cursor:pointer;`;
+      btn.onclick = () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = fn;
+        a.click();
+        btn.textContent = 'Saving...';
+        setTimeout(() => { btn.textContent = text; }, 3000);
+      };
+      return btn;
+    };
+
+    btnRow.appendChild(makeSaveBtn(`Save Video (${vMB}MB)`, vBlob, fileName + '-video.mp4', '#28a745'));
+    btnRow.appendChild(makeSaveBtn(`Save Audio (${aMB}MB)`, aBlob, fileName + '-audio.mp4', '#007bff'));
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '\u00D7';
+    closeBtn.style.cssText = 'position:absolute;top:6px;right:10px;background:none;border:none;color:#aaa;font-size:18px;cursor:pointer;';
+    closeBtn.onclick = () => panel.remove();
+    panel.style.position = 'fixed';
+    panel.appendChild(closeBtn);
+    document.body.appendChild(panel);
+
+    if (onProgress) onProgress({ stage: 'done', message: 'Ready! Click buttons to save.', percent: 100 });
 
     return {
       success: true,
