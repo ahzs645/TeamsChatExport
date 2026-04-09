@@ -52,6 +52,41 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['requestHeaders']
 );
 
+// Store transcript API metadata from any frame (top frame or iframe)
+const transcriptAPICache = {}; // { tabId: { metadata, tokens, transcriptData } }
+
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'storeTranscriptAPIMeta') {
+    const tabId = sender.tab?.id;
+    if (tabId) {
+      if (!transcriptAPICache[tabId]) transcriptAPICache[tabId] = {};
+      transcriptAPICache[tabId].metadata = {
+        ...(transcriptAPICache[tabId].metadata || {}),
+        ...request.metadata
+      };
+      if (request.tokens) {
+        transcriptAPICache[tabId].tokens = {
+          ...(transcriptAPICache[tabId].tokens || {}),
+          ...request.tokens
+        };
+      }
+      // Broadcast to all frames in this tab so the iframe content script can use it
+      chrome.tabs.sendMessage(tabId, {
+        action: 'transcriptAPIMetaUpdated',
+        metadata: transcriptAPICache[tabId].metadata,
+        tokens: transcriptAPICache[tabId].tokens || {}
+      }, () => { if (chrome.runtime.lastError) { /* ignore */ } });
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+  if (request.action === 'getTranscriptAPIMeta') {
+    const tabId = sender.tab?.id;
+    sendResponse(transcriptAPICache[tabId] || {});
+    return true;
+  }
+});
+
 // Allow content scripts to request current captured tokens
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'getSharePointTokens') {

@@ -17,7 +17,8 @@
         "*://teams.microsoft.com/*",
         "*://*.teams.microsoft.com/*",
         "*://*.sharepoint.com/*",
-        "https://*/*stream.aspx*"
+        "https://*/*stream.aspx*",
+        "*://teams.cloud.microsoft/*"
      ],
      "type": "module",
      "run_at": "document_start",
@@ -35,7 +36,8 @@
   "host_permissions": [
      "*://*.sharepoint.com/*",
      "*://teams.microsoft.com/*",
-     "*://*.teams.microsoft.com/*"
+     "*://*.teams.microsoft.com/*",
+     "*://teams.cloud.microsoft/*"
   ],
   "version": "6.5",
   "web_accessible_resources": [ {

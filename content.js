@@ -16,7 +16,8 @@ const isVideoPage = () => {
 };
 
 const isTeamsPage = () => {
-  return window.location.href.includes('teams.microsoft.com');
+  return window.location.href.includes('teams.microsoft.com') ||
+         window.location.href.includes('teams.cloud.microsoft');
 };
 
 // === IMMEDIATE SCRIPT INJECTION ===
@@ -119,9 +120,46 @@ const isTeamsPage = () => {
     }
   });
 
+  // --- Cross-frame transcript API metadata ---
+  // Watch for API metadata changes in the page's hidden div and forward to background
+  let lastAPIMetaUpdate = 0;
+  const forwardAPIMetaToBackground = () => {
+    const apiDiv = document.getElementById('transcript-api-data');
+    if (!apiDiv) return;
+    const updated = parseInt(apiDiv.getAttribute('data-updated') || '0');
+    if (updated <= lastAPIMetaUpdate) return;
+    lastAPIMetaUpdate = updated;
+    try {
+      const metadata = JSON.parse(apiDiv.getAttribute('data-transcript-api') || '{}');
+      const tokens = JSON.parse(apiDiv.getAttribute('data-sp-tokens') || '{}');
+      if (Object.keys(metadata).length > 0 || Object.keys(tokens).length > 0) {
+        chrome.runtime.sendMessage({
+          action: 'storeTranscriptAPIMeta',
+          metadata,
+          tokens
+        }, () => { if (chrome.runtime.lastError) { /* ignore */ } });
+      }
+    } catch (e) {}
+  };
+
+  // Poll for API metadata changes (the page script updates the hidden div)
+  setInterval(forwardAPIMetaToBackground, 2000);
+
+  // Store cross-frame metadata received from background
+  let crossFrameAPIMeta = {};
+  let crossFrameTokens = {};
+
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.action) {
+      case 'transcriptAPIMetaUpdated':
+        // Received API metadata from another frame (via background.js)
+        crossFrameAPIMeta = request.metadata || {};
+        crossFrameTokens = request.tokens || {};
+        console.log('[Teams Chat Extractor] Received cross-frame API metadata:',
+          Object.keys(crossFrameAPIMeta).length, 'entries');
+        sendResponse({ received: true });
+        return true;
       case 'sharePointTokenCaptured':
         // Forward from background script to page context
         forwardTokenToPage(request.host, request.token, request.capturedAt);
@@ -331,11 +369,13 @@ const isTeamsPage = () => {
   };
 
   const getTokenForUrl = (transcriptUrl) => {
-    const tokens = getSharePointTokens();
-    if (!transcriptUrl || Object.keys(tokens).length === 0) return null;
+    // Check local tokens, cross-frame tokens, and background tokens
+    const localTokens = getSharePointTokens();
+    const allTokens = { ...crossFrameTokens, ...localTokens };
+    if (!transcriptUrl || Object.keys(allTokens).length === 0) return null;
     try {
       const host = new URL(transcriptUrl).hostname;
-      const tokenEntry = tokens[host];
+      const tokenEntry = allTokens[host];
       if (tokenEntry && tokenEntry.token) {
         if (Date.now() - tokenEntry.capturedAt < 30 * 60 * 1000) {
           return tokenEntry.token;
@@ -456,21 +496,53 @@ const isTeamsPage = () => {
     }
   };
 
-  // Priority: 1) API metadata fetch, 2) captured cdnmedia response, 3) React state, 4) DOM
+  // Priority: 1) API metadata fetch (local or cross-frame), 2) captured cdnmedia, 3) React state, 4) DOM
   const getTranscriptData = async () => {
     const utils = window.__teamsTranscriptUtils;
 
-    // 1. Try API approach via readcollabobject metadata - batch downloader path
+    // 1a. Try API approach via local readcollabobject metadata
     const allMeta = getAPIMetadata();
-    const metaKeys = Object.keys(allMeta);
+    let metaKeys = Object.keys(allMeta);
     if (metaKeys.length > 0) {
       const latestKey = metaKeys[metaKeys.length - 1];
       const apiResult = await fetchTranscriptViaAPI(allMeta[latestKey]);
       if (apiResult) {
-        console.log('[Teams Chat Extractor] Using API-fetched transcript (complete)');
+        console.log('[Teams Chat Extractor] Using API-fetched transcript (complete, local)');
         return apiResult;
       }
     }
+
+    // 1b. Try cross-frame API metadata (from another frame in same tab, via background.js)
+    if (Object.keys(crossFrameAPIMeta).length > 0) {
+      metaKeys = Object.keys(crossFrameAPIMeta);
+      const latestKey = metaKeys[metaKeys.length - 1];
+      const apiResult = await fetchTranscriptViaAPI(crossFrameAPIMeta[latestKey]);
+      if (apiResult) {
+        console.log('[Teams Chat Extractor] Using API-fetched transcript (complete, cross-frame)');
+        return apiResult;
+      }
+    }
+
+    // 1c. Ask background.js for any cached metadata (fallback)
+    try {
+      const bgMeta = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: 'getTranscriptAPIMeta' }, (resp) => {
+          if (chrome.runtime.lastError) resolve({});
+          else resolve(resp || {});
+        });
+      });
+      if (bgMeta.metadata) {
+        metaKeys = Object.keys(bgMeta.metadata);
+        if (metaKeys.length > 0) {
+          const latestKey = metaKeys[metaKeys.length - 1];
+          const apiResult = await fetchTranscriptViaAPI(bgMeta.metadata[latestKey]);
+          if (apiResult) {
+            console.log('[Teams Chat Extractor] Using API-fetched transcript (complete, from background cache)');
+            return apiResult;
+          }
+        }
+      }
+    } catch (e) {}
 
     // 2. Try captured cdnmedia/transcripts response (intercepted at page load)
     const captured = getCapturedTranscriptContent();
@@ -692,9 +764,92 @@ const isTeamsPage = () => {
   };
 
   // Try injecting into both toolbar locations
+  // === LOCATION 3: Teams Recap Page (teams.cloud.microsoft) ===
+  const injectTeamsRecapButtons = () => {
+    // Only on teams.cloud.microsoft
+    if (!window.location.hostname.includes('teams.cloud.microsoft')) return;
+
+    // Don't inject twice
+    if (document.querySelector('.tce-teams-recap-bar')) return;
+
+    // Check if we have API metadata (means we're on a recap page)
+    // Note: __transcriptAPIData is in the page world, not content script world.
+    // Read from the hidden DOM element instead.
+    const apiDiv = document.getElementById('transcript-api-data');
+    let hasAPIMeta = false;
+    if (apiDiv) {
+      try {
+        const meta = JSON.parse(apiDiv.getAttribute('data-transcript-api') || '{}');
+        hasAPIMeta = Object.keys(meta).length > 0;
+      } catch (e) {}
+    }
+    if (!hasAPIMeta) return;
+
+    // Find the Notes/AI summary/Transcript tablist
+    const tablists = document.querySelectorAll('[role="tablist"]');
+    let targetTablist = null;
+    for (const tl of tablists) {
+      if (tl.textContent?.includes('Transcript')) {
+        targetTablist = tl;
+        break;
+      }
+    }
+    if (!targetTablist) return;
+    const recapPanel = targetTablist.parentElement;
+    if (!recapPanel) return;
+
+    // Create a compact toolbar
+    const bar = document.createElement('div');
+    bar.className = 'tce-teams-recap-bar';
+    bar.style.cssText = 'display:flex;gap:4px;padding:4px 8px;align-items:center;justify-content:flex-end;';
+
+    const makeBtn = (text, handler) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'tce-cmd-btn';
+      btn.textContent = text;
+      btn.style.cssText = 'font-size:11px;padding:2px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;color:#444;';
+      btn.addEventListener('click', handler);
+      btn.addEventListener('mouseenter', () => { btn.style.background = '#e0e0e0'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
+      return btn;
+    };
+
+    const copyBtn = makeBtn('\u{1F4CB} Copy', async () => {
+      const data = await getTranscriptData();
+      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
+      await navigator.clipboard.writeText(data.vtt);
+      copyBtn.textContent = 'Copied!';
+      setTimeout(() => { copyBtn.textContent = '\u{1F4CB} Copy'; }, 1500);
+    });
+
+    const dlVttBtn = makeBtn('\u2B07 VTT', async () => {
+      const data = await getTranscriptData();
+      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
+      const title = document.querySelector('h1,h2')?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '') || 'transcript';
+      downloadFile(data.vtt, `transcript-${title}.vtt`);
+    });
+
+    const dlTxtBtn = makeBtn('\u2B07 TXT', async () => {
+      const data = await getTranscriptData();
+      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
+      const title = document.querySelector('h1,h2')?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '') || 'transcript';
+      downloadFile(data.txt, `transcript-${title}.txt`);
+    });
+
+    bar.appendChild(copyBtn);
+    bar.appendChild(dlVttBtn);
+    bar.appendChild(dlTxtBtn);
+
+    // Insert after the tablist's parent container (below the tabs, inside the scrollable area)
+    targetTablist.parentElement.insertAdjacentElement('afterend', bar);
+    console.log('[Teams Chat Extractor] Injected buttons into Teams recap page');
+  };
+
   const tryInjectToolbarButtons = () => {
     injectRecapToolbarButtons();
     injectTranscriptActionButtons();
+    injectTeamsRecapButtons();
   };
 
   // === VIDEO DOWNLOAD PANEL ===
@@ -1292,6 +1447,10 @@ const isTeamsPage = () => {
       const transcriptBar = document.querySelector('[aria-label="Transcript actions"]');
       if (transcriptBar && !transcriptBar.hasAttribute('data-tce-injected')) {
         injectTranscriptActionButtons();
+      }
+      // Check if Teams recap page needs buttons
+      if (!document.querySelector('.tce-teams-recap-bar')) {
+        injectTeamsRecapButtons();
       }
     });
     observer.observe(document.body, { childList: true, subtree: true });
