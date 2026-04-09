@@ -1,48 +1,33 @@
 /**
  * Manifest Download Module
- * Downloads video by fetching the videomanifest URL and downloading all segments in parallel.
- * This is the most popular online method (used by ms-teams-sharepoint-downloader, FFmpeg approach, etc.)
- * The manifest URL contains embedded auth tokens, so no extra auth is needed.
- * Works even when download permission is disabled.
+ * Downloads video by fetching encrypted segments in parallel and decrypting them
+ * using the captured AES-CBC key from the player's crypto.subtle.decrypt calls.
+ *
+ * Flow:
+ * 1. Player briefly plays → crypto.subtle.decrypt is called → we capture key + IV
+ * 2. We fetch ALL encrypted segments in parallel (fast, no playback needed)
+ * 3. We decrypt each segment with crypto.subtle.decrypt(algo, key, data)
+ * 4. Combine init segments + decrypted moof segments → playable MP4
+ *
+ * This is the fastest approach for DRM-protected content:
+ * - No full playback needed (just 1-2 seconds to capture the key)
+ * - Parallel downloads (~6 concurrent)
+ * - Original quality (no re-encoding)
  */
 (() => {
   const MODULE_NAME = 'manifestDownload';
   const MAX_CONCURRENT = 6;
   const SEGMENT_TIMEOUT = 30000;
+  const SEGMENT_DURATION_MS = 2000; // 2 seconds per segment (typical for SharePoint)
 
-  /**
-   * Find the videomanifest URL from performance entries or captured data.
-   */
-  const findManifestUrl = () => {
-    // Check performance entries first
-    const entries = performance.getEntriesByType('resource');
-    const manifestEntry = entries.find(e =>
-      e.name.includes('videomanifest') || e.name.includes('manifest(format=')
-    );
-    if (manifestEntry) return manifestEntry.name;
+  // === Crypto Access ===
 
-    // Check captured URLs from videoDownloadOverride
-    if (window.__teamsVideoCapture) {
-      const tokens = window.__teamsVideoCapture.getTokens?.();
-      if (tokens?.videoTemplate) {
-        // The template URL can be converted back to a manifest URL
-        try {
-          const u = new URL(tokens.videoTemplate);
-          // Remove segment-specific params to get manifest
-          u.searchParams.delete('segmentTime');
-          u.searchParams.delete('part');
-          u.searchParams.set('part', 'manifest');
-          return u.toString();
-        } catch (e) {}
-      }
-    }
+  const getCrypto = () => window.__videoCryptoCapture || { ready: false };
 
-    return null;
-  };
+  const hasCryptoKey = () => getCrypto().ready === true;
 
-  /**
-   * Find video/audio segment URL templates from captured data.
-   */
+  // === Segment Templates ===
+
   const findSegmentTemplates = () => {
     if (!window.__teamsVideoCapture) return null;
     const tokens = window.__teamsVideoCapture.getTokens?.();
@@ -53,106 +38,46 @@
     };
   };
 
-  /**
-   * Parse the manifest to get segment information.
-   */
-  const parseManifest = async (manifestUrl) => {
-    try {
-      const resp = await fetch(manifestUrl);
-      if (!resp.ok) return null;
+  // === Init Segment Capture ===
+  // We need the ftyp+moov init segments which are only available after the player
+  // decrypts and feeds them to appendBuffer. We capture them from MSE.
 
-      const contentType = resp.headers.get('content-type') || '';
-      const text = await resp.text();
-
-      // Try parsing as JSON (DASH-like manifest)
-      if (contentType.includes('json') || text.startsWith('{')) {
-        try {
-          const data = JSON.parse(text);
-          return parseJsonManifest(data);
-        } catch (e) {}
-      }
-
-      // Try parsing as XML (MPD format)
-      if (text.includes('<MPD') || text.includes('<SmoothStreamingMedia')) {
-        return parseXmlManifest(text);
-      }
-
-      return null;
-    } catch (e) {
-      return null;
-    }
-  };
-
-  const parseJsonManifest = (data) => {
-    const result = { duration: 0, videoSegments: [], audioSegments: [] };
-
-    // SharePoint/Stream manifest format
-    if (data.Duration) result.duration = data.Duration / 10000000; // 100ns ticks to seconds
-
-    const streams = data.Streams || data.streams || [];
-    for (const stream of streams) {
-      const type = (stream.Type || stream.type || '').toLowerCase();
-      const chunks = stream.Chunks || stream.chunks || [];
-      const segments = chunks.map((chunk, i) => ({
-        index: i,
-        time: chunk.Offset || chunk.offset || chunk.StartTime || 0,
-        duration: chunk.Duration || chunk.duration || 2000
-      }));
-
-      if (type === 'video' || type === '0') {
-        result.videoSegments = segments;
-      } else if (type === 'audio' || type === '1') {
-        result.audioSegments = segments;
+  const getInitSegments = () => {
+    // Check if videoDownloadOverride captured them
+    if (window.__teamsVideoCapture) {
+      const stats = window.__teamsVideoCapture.getStats?.();
+      if (stats?.hasVideoInit && stats?.hasAudioInit) {
+        return { fromCapture: true };
       }
     }
-
-    return result;
+    // Check our own stored init segments
+    return window.__manifestInitSegments || null;
   };
 
-  const parseXmlManifest = (xmlText) => {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, 'text/xml');
-    const result = { duration: 0, videoSegments: [], audioSegments: [] };
+  // === Segment Fetching + Decryption ===
 
-    // Smooth Streaming format
-    const root = doc.querySelector('SmoothStreamingMedia');
-    if (root) {
-      result.duration = parseInt(root.getAttribute('Duration') || '0') / 10000000;
-    }
+  const fetchAndDecrypt = async (url, cryptoKey, algo) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SEGMENT_TIMEOUT);
 
-    const streamIndexes = doc.querySelectorAll('StreamIndex');
-    streamIndexes.forEach(si => {
-      const type = (si.getAttribute('Type') || '').toLowerCase();
-      const chunks = si.querySelectorAll('c');
-      let currentTime = 0;
-      const segments = [];
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-      chunks.forEach((c, i) => {
-        const t = parseInt(c.getAttribute('t') || currentTime);
-        const d = parseInt(c.getAttribute('d') || '20000000');
-        segments.push({ index: i, time: t, duration: d });
-        currentTime = t + d;
-      });
+    const encrypted = await resp.arrayBuffer();
 
-      if (type === 'video') result.videoSegments = segments;
-      else if (type === 'audio') result.audioSegments = segments;
-    });
+    // Decrypt using the captured AES-CBC key
+    // Need to recreate the algo object with a fresh IV copy each time
+    const decryptAlgo = { name: algo.name, iv: algo.iv || getCrypto().iv };
+    const decrypted = await crypto.subtle.decrypt(decryptAlgo, cryptoKey, encrypted);
 
-    return result;
+    return decrypted;
   };
 
-  /**
-   * Download a single segment with retry.
-   */
-  const fetchSegment = async (url, retries = 2) => {
+  const fetchAndDecryptWithRetry = async (url, cryptoKey, algo, retries = 2) => {
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), SEGMENT_TIMEOUT);
-        const resp = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeout);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return await resp.arrayBuffer();
+        return await fetchAndDecrypt(url, cryptoKey, algo);
       } catch (e) {
         if (attempt === retries) throw e;
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
@@ -160,72 +85,110 @@
     }
   };
 
-  /**
-   * Download all segments in parallel with concurrency limit.
-   */
-  const downloadSegments = async (template, segments, onProgress) => {
-    const results = new Array(segments.length);
-    let completed = 0;
+  // === Parallel Download Engine ===
 
-    const downloadOne = async (seg) => {
-      const url = template.replace('{TIME}', seg.time).replace('%7BTIME%7D', seg.time);
-      results[seg.index] = await fetchSegment(url);
-      completed++;
-      if (onProgress) {
-        onProgress({ completed, total: segments.length, percent: Math.round(completed / segments.length * 100) });
+  const downloadAllSegments = async (template, segmentCount, cryptoKey, algo, onProgress, label) => {
+    const results = new Array(segmentCount);
+    let completed = 0;
+    let failed = 0;
+
+    const queue = Array.from({ length: segmentCount }, (_, i) => i);
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const i = queue.shift();
+        if (i === undefined) break;
+
+        const time = i * SEGMENT_DURATION_MS;
+        const url = template.replace('{TIME}', time).replace('%7BTIME%7D', time);
+
+        try {
+          results[i] = await fetchAndDecryptWithRetry(url, cryptoKey, algo);
+          completed++;
+        } catch (e) {
+          console.warn(`[manifestDownload] ${label} segment ${i} failed:`, e.message);
+          failed++;
+          completed++;
+        }
+
+        if (onProgress) {
+          onProgress({
+            stage: label,
+            message: `${label}: ${completed}/${segmentCount} segments (${failed} failed)`,
+            percent: Math.round(completed / segmentCount * 100),
+            completed,
+            total: segmentCount,
+            failed
+          });
+        }
       }
     };
 
-    // Process with concurrency limit
-    const queue = [...segments];
-    const workers = [];
-    for (let i = 0; i < MAX_CONCURRENT; i++) {
-      workers.push((async () => {
-        while (queue.length > 0) {
-          const seg = queue.shift();
-          if (seg) await downloadOne(seg);
-        }
-      })());
-    }
+    // Run workers in parallel
+    const workers = Array.from({ length: MAX_CONCURRENT }, () => worker());
     await Promise.all(workers);
 
     return results.filter(Boolean);
   };
 
-  /**
-   * Check if this method is available.
-   */
+  // === Init Segment Capture via Brief Playback ===
+
+  const captureInitSegments = () => {
+    return new Promise((resolve) => {
+      let videoInit = null, audioInit = null;
+      const origAppend = SourceBuffer.prototype.appendBuffer;
+
+      SourceBuffer.prototype.appendBuffer = function(data) {
+        const arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
+        if (arr.length >= 8) {
+          const boxType = String.fromCharCode(arr[4], arr[5], arr[6], arr[7]);
+          const mime = this._mseTrackType || '';
+          if (boxType === 'ftyp') {
+            if (mime.includes('audio') && !audioInit) {
+              audioInit = arr.slice().buffer;
+            } else if (!videoInit) {
+              videoInit = arr.slice().buffer;
+            }
+          }
+        }
+        const result = origAppend.call(this, data);
+        // Once we have both, resolve
+        if (videoInit && audioInit) {
+          SourceBuffer.prototype.appendBuffer = origAppend;
+          window.__manifestInitSegments = { videoInit, audioInit };
+          resolve({ videoInit, audioInit });
+        }
+        return result;
+      };
+
+      // If the video was already playing, seek to trigger new init
+      const video = document.querySelector('video');
+      if (video) {
+        video.currentTime = 0;
+        // Timeout: if we don't get init in 10 seconds, resolve with what we have
+        setTimeout(() => {
+          SourceBuffer.prototype.appendBuffer = origAppend;
+          if (videoInit || audioInit) {
+            window.__manifestInitSegments = { videoInit, audioInit };
+            resolve({ videoInit, audioInit });
+          } else {
+            resolve(null);
+          }
+        }, 10000);
+      } else {
+        resolve(null);
+      }
+    });
+  };
+
+  // === Main Download Function ===
+
   const isAvailable = () => {
-    const templates = findSegmentTemplates();
-    if (!templates) return false;
-    // Quick check: if URL contains enableEncryption=1, segments are likely encrypted
-    // (full check happens at download time via areSegmentsEncrypted)
-    if (templates.videoTemplate?.includes('enableEncryption=1')) return false;
-    return true;
+    return !!(findSegmentTemplates() && hasCryptoKey());
   };
 
   /**
-   * Test if segments are encrypted by fetching the first one and checking for MP4 box headers.
-   */
-  const areSegmentsEncrypted = async (template) => {
-    try {
-      const url = template.replace('{TIME}', '0').replace('%7BTIME%7D', '0');
-      const resp = await fetch(url);
-      if (!resp.ok) return true; // assume encrypted if fetch fails
-      const buf = await resp.arrayBuffer();
-      const bytes = new Uint8Array(buf.slice(0, 8));
-      const boxType = String.fromCharCode(...bytes.slice(4, 8));
-      // Valid fMP4 segments start with styp, moof, ftyp, or similar
-      return !['ftyp', 'moof', 'styp', 'mdat', 'free', 'sidx'].includes(boxType);
-    } catch (e) {
-      return true;
-    }
-  };
-
-  /**
-   * Attempt manifest-based download.
-   * @param {Function} onProgress - progress callback({stage, message, percent})
-   * @returns {Promise<{success: boolean, error?: string}>}
+   * Download the full video by fetching + decrypting all segments in parallel.
    */
   const download = async (onProgress) => {
     const templates = findSegmentTemplates();
@@ -233,107 +196,127 @@
       return { success: false, error: 'No segment templates found. Play the video briefly first.' };
     }
 
-    // Check if segments are encrypted (DRM)
-    if (onProgress) onProgress({ stage: 'checking', message: 'Checking for encryption...' });
-    const encrypted = await areSegmentsEncrypted(templates.videoTemplate);
-    if (encrypted) {
-      return { success: false, error: 'Segments are DRM-encrypted. Use "Record Stream" method instead.' };
+    const cryptoData = getCrypto();
+    if (!cryptoData.ready) {
+      return { success: false, error: 'No decryption key captured. Play the video for a few seconds first.' };
     }
 
-    // Try to get segment times from manifest
-    const manifestUrl = findManifestUrl();
-    let manifestData = null;
-    if (manifestUrl) {
-      if (onProgress) onProgress({ stage: 'manifest', message: 'Fetching video manifest...' });
-      manifestData = await parseManifest(manifestUrl);
-    }
-
-    // If we have manifest data, use its segment times
-    // Otherwise, generate segment times based on video duration
     const video = document.querySelector('video');
-    const duration = video?.duration || 5000;
-    const segmentDuration = 2; // 2 seconds per segment (typical)
-
-    let videoSegments, audioSegments;
-    if (manifestData && manifestData.videoSegments.length > 0) {
-      videoSegments = manifestData.videoSegments;
-      audioSegments = manifestData.audioSegments;
-    } else {
-      // Generate segment list from duration
-      const segCount = Math.ceil(duration / segmentDuration);
-      videoSegments = Array.from({ length: segCount }, (_, i) => ({
-        index: i,
-        time: i * segmentDuration * 1000, // milliseconds
-        duration: segmentDuration * 1000
-      }));
-      audioSegments = videoSegments.map(s => ({ ...s }));
+    const duration = video?.duration || 0;
+    if (!duration) {
+      return { success: false, error: 'Cannot determine video duration.' };
     }
+
+    const segmentCount = Math.ceil(duration / (SEGMENT_DURATION_MS / 1000));
 
     if (onProgress) onProgress({
-      stage: 'downloading',
-      message: `Downloading ${videoSegments.length} video segments...`,
+      stage: 'init',
+      message: `Preparing: ${segmentCount} segments to download (~${Math.round(duration / 60)} min video)`,
       percent: 0
     });
 
-    try {
-      // Download video segments
-      const videoBuffers = await downloadSegments(
-        templates.videoTemplate,
-        videoSegments,
-        (p) => {
-          if (onProgress) onProgress({
-            stage: 'video',
-            message: `Video: ${p.completed}/${p.total} segments`,
-            percent: Math.round(p.percent * 0.6) // 0-60%
-          });
-        }
-      );
-
-      // Download audio segments
-      if (onProgress) onProgress({ stage: 'audio', message: 'Downloading audio segments...', percent: 60 });
-      const audioBuffers = await downloadSegments(
-        templates.audioTemplate,
-        audioSegments,
-        (p) => {
-          if (onProgress) onProgress({
-            stage: 'audio',
-            message: `Audio: ${p.completed}/${p.total} segments`,
-            percent: 60 + Math.round(p.percent * 0.3) // 60-90%
-          });
-        }
-      );
-
-      if (onProgress) onProgress({ stage: 'combining', message: 'Combining video and audio...', percent: 90 });
-
-      // Combine all buffers into a single blob
-      const videoBlob = new Blob(videoBuffers, { type: 'video/mp4' });
-      const audioBlob = new Blob(audioBuffers, { type: 'audio/mp4' });
-
-      // Try to mux with MP4Muxer if available, otherwise download separately
-      if (window.MP4Muxer) {
-        try {
-          const combined = window.MP4Muxer.mux(
-            null, videoBuffers, null, audioBuffers
-          );
-          const blob = new Blob([combined], { type: 'video/mp4' });
-          triggerDownload(blob, getFileName('mp4'));
-          if (onProgress) onProgress({ stage: 'done', message: 'Download complete!', percent: 100 });
-          return { success: true };
-        } catch (e) {
-          console.warn('[manifestDownload] Muxing failed, downloading separately:', e);
-        }
+    // Step 1: Capture init segments if we don't have them
+    let initSegs = getInitSegments();
+    if (!initSegs || !initSegs.videoInit) {
+      if (onProgress) onProgress({ stage: 'init', message: 'Capturing init segments (brief play)...', percent: 0 });
+      initSegs = await captureInitSegments();
+      if (!initSegs || !initSegs.videoInit) {
+        return { success: false, error: 'Failed to capture init segments. Try playing the video briefly first.' };
       }
-
-      // Fallback: download video+audio separately
-      triggerDownload(videoBlob, getFileName('video.mp4'));
-      triggerDownload(audioBlob, getFileName('audio.mp4'));
-      if (onProgress) onProgress({ stage: 'done', message: 'Downloaded video and audio separately', percent: 100 });
-      return { success: true };
-
-    } catch (err) {
-      return { success: false, error: `Download failed: ${err.message}` };
     }
+
+    // Step 2: Download + decrypt all video segments
+    if (onProgress) onProgress({
+      stage: 'video',
+      message: `Downloading ${segmentCount} video segments...`,
+      percent: 0
+    });
+
+    let videoSegments;
+    try {
+      videoSegments = await downloadAllSegments(
+        templates.videoTemplate,
+        segmentCount,
+        cryptoData.key,
+        cryptoData.algo,
+        (p) => {
+          if (onProgress) onProgress({
+            ...p,
+            percent: Math.round(p.percent * 0.6) // 0-60% for video
+          });
+        },
+        'Video'
+      );
+    } catch (e) {
+      return { success: false, error: `Video download failed: ${e.message}` };
+    }
+
+    // Step 3: Download + decrypt all audio segments
+    if (onProgress) onProgress({ stage: 'audio', message: 'Downloading audio segments...', percent: 60 });
+
+    let audioSegments;
+    try {
+      audioSegments = await downloadAllSegments(
+        templates.audioTemplate,
+        segmentCount,
+        cryptoData.key,
+        cryptoData.algo,
+        (p) => {
+          if (onProgress) onProgress({
+            ...p,
+            stage: 'Audio',
+            percent: 60 + Math.round(p.percent * 0.3) // 60-90% for audio
+          });
+        },
+        'Audio'
+      );
+    } catch (e) {
+      return { success: false, error: `Audio download failed: ${e.message}` };
+    }
+
+    // Step 4: Combine into playable file
+    if (onProgress) onProgress({ stage: 'combining', message: 'Combining video + audio...', percent: 90 });
+
+    const fileName = getFileName('mp4');
+
+    // Try MP4 muxer for combined file
+    if (window.MP4Muxer && initSegs.videoInit && initSegs.audioInit) {
+      try {
+        const combined = window.MP4Muxer.mux(
+          initSegs.videoInit, videoSegments,
+          initSegs.audioInit, audioSegments
+        );
+        const blob = new Blob([combined], { type: 'video/mp4' });
+        triggerDownload(blob, fileName);
+
+        if (onProgress) onProgress({
+          stage: 'done',
+          message: `Done! ${fileName} (${Math.round(blob.size / 1024 / 1024)}MB)`,
+          percent: 100
+        });
+        return { success: true, fileName, fileSize: blob.size, method: 'muxed' };
+      } catch (e) {
+        console.warn('[manifestDownload] Mux failed, downloading separately:', e.message);
+      }
+    }
+
+    // Fallback: download video and audio separately
+    const vBlob = new Blob([initSegs.videoInit, ...videoSegments], { type: 'video/mp4' });
+    const aBlob = new Blob([initSegs.audioInit, ...audioSegments], { type: 'audio/mp4' });
+
+    triggerDownload(vBlob, getFileName('video.mp4'));
+    setTimeout(() => triggerDownload(aBlob, getFileName('audio.mp4')), 500);
+
+    if (onProgress) onProgress({
+      stage: 'done',
+      message: `Done! Downloaded video (${Math.round(vBlob.size / 1024 / 1024)}MB) + audio (${Math.round(aBlob.size / 1024 / 1024)}MB) separately`,
+      percent: 100
+    });
+
+    return { success: true, method: 'separate', videoSize: vBlob.size, audioSize: aBlob.size };
   };
+
+  // === Helpers ===
 
   const getFileName = (ext) => {
     const title = document.querySelector('h1, h2, [class*="videoTitle"] label')
@@ -350,19 +333,21 @@
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
   };
 
   // Expose module
   window.__videoDownloadModules = window.__videoDownloadModules || {};
   window.__videoDownloadModules[MODULE_NAME] = {
     name: MODULE_NAME,
-    label: 'Manifest Download',
-    description: 'Fast parallel segment download (play video briefly first to capture tokens)',
+    label: 'Fast Download',
+    description: 'Parallel fetch + decrypt (play video briefly first to capture key)',
     isAvailable,
     download,
-    findManifestUrl,
-    findSegmentTemplates
+    // Expose for debugging
+    hasCryptoKey,
+    findSegmentTemplates,
+    getInitSegments
   };
 
   console.log('[Teams Chat Exporter] Video download module loaded: manifestDownload');

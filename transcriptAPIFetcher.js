@@ -22,6 +22,43 @@
 	const origText = Response.prototype.text;
 	const HIDDEN_DIV_ID = 'transcript-api-data';
 
+	// === Capture AES decryption key+IV for video segment decryption ===
+	// The Stream player uses crypto.subtle.decrypt(AES-CBC) to decrypt segments.
+	// We capture the CryptoKey object + algorithm so we can decrypt segments ourselves
+	// without needing video playback.
+	window.__videoCryptoCapture = window.__videoCryptoCapture || { key: null, algo: null, ready: false };
+
+	const CRYPTO_DIV_ID = 'video-crypto-data';
+	const updateCryptoDiv = () => {
+		let div = document.getElementById(CRYPTO_DIV_ID);
+		if (!div) {
+			div = document.createElement('div');
+			div.id = CRYPTO_DIV_ID;
+			div.style.display = 'none';
+			document.body.appendChild(div);
+		}
+		div.setAttribute('data-ready', window.__videoCryptoCapture.ready ? '1' : '0');
+		div.setAttribute('data-updated', Date.now().toString());
+	};
+
+	if (crypto.subtle && !crypto.subtle.__teamsChatExporterHooked) {
+		crypto.subtle.__teamsChatExporterHooked = true;
+		const origDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+
+		crypto.subtle.decrypt = function(algo, key, data) {
+			if (!window.__videoCryptoCapture.ready && algo?.name === 'AES-CBC') {
+				window.__videoCryptoCapture = { key, algo: { ...algo }, ready: true };
+				// Store a copy of the IV as it may be reused
+				if (algo.iv) {
+					window.__videoCryptoCapture.iv = new Uint8Array(algo.iv).slice();
+				}
+				updateCryptoDiv();
+				console.log('[Teams Chat Exporter] Captured AES-CBC decryption key + IV for video segments');
+			}
+			return origDecrypt(algo, key, data);
+		};
+	}
+
 	// Store all captured transcript metadata keyed by thread+calendarEvent
 	window.__transcriptAPIData = {};
 
