@@ -4,155 +4,99 @@
  * using the captured AES-CBC key from the player's crypto.subtle.decrypt calls.
  *
  * Flow:
- * 1. Player briefly plays → crypto.subtle.decrypt is called → we capture key + IV
- * 2. We fetch ALL encrypted segments in parallel (fast, no playback needed)
- * 3. We decrypt each segment with crypto.subtle.decrypt(algo, key, data)
- * 4. Combine init segments + decrypted moof segments → playable MP4
+ * 1. Player briefly plays -> crypto.subtle.decrypt is called -> we capture key + IV
+ * 2. We discover segment URL templates from performance entries
+ * 3. We fetch ALL encrypted segments in parallel (fast, no playback needed)
+ * 4. We decrypt each segment with crypto.subtle.decrypt(algo, key, data)
+ * 5. Fix timestamps (tfdt baseDecodeTime) so segments are sequential
+ * 6. Combine init segments + fixed moof segments -> playable MP4
  *
- * This is the fastest approach for DRM-protected content:
+ * This is the fastest approach for encrypted content:
  * - No full playback needed (just 1-2 seconds to capture the key)
  * - Parallel downloads (~6 concurrent)
  * - Original quality (no re-encoding)
+ * - Correct timestamps for full-duration playback
  */
 (() => {
   const MODULE_NAME = 'manifestDownload';
   const MAX_CONCURRENT = 6;
   const SEGMENT_TIMEOUT = 30000;
-  const SEGMENT_DURATION_MS = 2000; // 2 seconds per segment (typical for SharePoint)
+  const SEGMENT_DURATION_MS = 2000;
 
   // === Crypto Access ===
 
   const getCrypto = () => window.__videoCryptoCapture || { ready: false };
-
   const hasCryptoKey = () => getCrypto().ready === true;
 
-  // === Segment Templates ===
+  // === Segment Template Discovery ===
 
+  /**
+   * Find segment URL templates from multiple sources.
+   * Priority: 1) videoDownloadOverride capture, 2) performance entries
+   */
   const findSegmentTemplates = () => {
-    if (!window.__teamsVideoCapture) return null;
-    const tokens = window.__teamsVideoCapture.getTokens?.();
-    if (!tokens?.videoTemplate) return null;
+    // Source 1: videoDownloadOverride's captured templates
+    if (window.__teamsVideoCapture) {
+      const tokens = window.__teamsVideoCapture.getTokens?.();
+      if (tokens?.videoTemplate && tokens?.audioTemplate) {
+        return { videoTemplate: tokens.videoTemplate, audioTemplate: tokens.audioTemplate, source: 'capture' };
+      }
+    }
+
+    // Source 2: Discover from performance entries (most reliable)
+    const entries = performance.getEntriesByType('resource');
+    const segEntries = entries.filter(e => e.name.includes('segmentTime='));
+    if (segEntries.length < 2) return null;
+
+    // Group by URL pattern (ignoring segmentTime value), identify video vs audio by size
+    const byPattern = {};
+    for (const e of segEntries) {
+      try {
+        const u = new URL(e.name);
+        u.searchParams.set('segmentTime', 'X');
+        const key = u.toString();
+        if (!byPattern[key]) byPattern[key] = { totalSize: 0, count: 0 };
+        byPattern[key].count++;
+        byPattern[key].totalSize += (e.transferSize || 0);
+        byPattern[key].url = key;
+      } catch (x) {}
+    }
+
+    const patterns = Object.values(byPattern);
+    if (patterns.length < 2) return null;
+
+    // Sort by average size descending: largest = video, smallest = audio
+    patterns.sort((a, b) => (b.totalSize / b.count) - (a.totalSize / a.count));
     return {
-      videoTemplate: tokens.videoTemplate,
-      audioTemplate: tokens.audioTemplate
+      videoTemplate: patterns[0].url.replace('segmentTime=X', 'segmentTime={TIME}'),
+      audioTemplate: patterns[1].url.replace('segmentTime=X', 'segmentTime={TIME}'),
+      source: 'performance'
     };
   };
 
   // === Init Segment Capture ===
-  // We need the ftyp+moov init segments which are only available after the player
-  // decrypts and feeds them to appendBuffer. We capture them from MSE.
 
-  const getInitSegments = () => {
-    // Check if videoDownloadOverride captured them
-    if (window.__teamsVideoCapture) {
-      const stats = window.__teamsVideoCapture.getStats?.();
-      if (stats?.hasVideoInit && stats?.hasAudioInit) {
-        return { fromCapture: true };
-      }
-    }
-    // Check our own stored init segments
-    return window.__manifestInitSegments || null;
-  };
+  const getInitSegments = () => window.__manifestInitSegments || null;
 
-  // === Segment Fetching + Decryption ===
-
-  const fetchAndDecrypt = async (url, cryptoKey, algo) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), SEGMENT_TIMEOUT);
-
-    const resp = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-
-    const encrypted = await resp.arrayBuffer();
-
-    // Decrypt using the captured AES-CBC key
-    // Need to recreate the algo object with a fresh IV copy each time
-    const decryptAlgo = { name: algo.name, iv: algo.iv || getCrypto().iv };
-    const decrypted = await crypto.subtle.decrypt(decryptAlgo, cryptoKey, encrypted);
-
-    return decrypted;
-  };
-
-  const fetchAndDecryptWithRetry = async (url, cryptoKey, algo, retries = 2) => {
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        return await fetchAndDecrypt(url, cryptoKey, algo);
-      } catch (e) {
-        if (attempt === retries) throw e;
-        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
-      }
-    }
-  };
-
-  // === Parallel Download Engine ===
-
-  const downloadAllSegments = async (template, segmentCount, cryptoKey, algo, onProgress, label) => {
-    const results = new Array(segmentCount);
-    let completed = 0;
-    let failed = 0;
-
-    const queue = Array.from({ length: segmentCount }, (_, i) => i);
-
-    const worker = async () => {
-      while (queue.length > 0) {
-        const i = queue.shift();
-        if (i === undefined) break;
-
-        const time = i * SEGMENT_DURATION_MS;
-        const url = template.replace('{TIME}', time).replace('%7BTIME%7D', time);
-
-        try {
-          results[i] = await fetchAndDecryptWithRetry(url, cryptoKey, algo);
-          completed++;
-        } catch (e) {
-          console.warn(`[manifestDownload] ${label} segment ${i} failed:`, e.message);
-          failed++;
-          completed++;
-        }
-
-        if (onProgress) {
-          onProgress({
-            stage: label,
-            message: `${label}: ${completed}/${segmentCount} segments (${failed} failed)`,
-            percent: Math.round(completed / segmentCount * 100),
-            completed,
-            total: segmentCount,
-            failed
-          });
-        }
-      }
-    };
-
-    // Run workers in parallel
-    const workers = Array.from({ length: MAX_CONCURRENT }, () => worker());
-    await Promise.all(workers);
-
-    return results.filter(Boolean);
-  };
-
-  // === Init Segment Capture via Brief Playback ===
-
+  /**
+   * Capture init segments by hooking appendBuffer and triggering a seek.
+   */
   const captureInitSegments = () => {
     return new Promise((resolve) => {
       let videoInit = null, audioInit = null;
       const origAppend = SourceBuffer.prototype.appendBuffer;
 
-      SourceBuffer.prototype.appendBuffer = function(data) {
+      SourceBuffer.prototype.appendBuffer = function (data) {
         const arr = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
         if (arr.length >= 8) {
-          const boxType = String.fromCharCode(arr[4], arr[5], arr[6], arr[7]);
+          const box = String.fromCharCode(arr[4], arr[5], arr[6], arr[7]);
           const mime = this._mseTrackType || '';
-          if (boxType === 'ftyp') {
-            if (mime.includes('audio') && !audioInit) {
-              audioInit = arr.slice().buffer;
-            } else if (!videoInit) {
-              videoInit = arr.slice().buffer;
-            }
+          if (box === 'ftyp') {
+            if (mime.includes('audio') && !audioInit) audioInit = arr.slice().buffer;
+            else if (!videoInit) videoInit = arr.slice().buffer;
           }
         }
         const result = origAppend.call(this, data);
-        // Once we have both, resolve
         if (videoInit && audioInit) {
           SourceBuffer.prototype.appendBuffer = origAppend;
           window.__manifestInitSegments = { videoInit, audioInit };
@@ -161,39 +105,174 @@
         return result;
       };
 
-      // If the video was already playing, seek to trigger new init
+      // Seek far then back to force player to re-send init segments
       const video = document.querySelector('video');
       if (video) {
-        video.currentTime = 0;
-        // Timeout: if we don't get init in 10 seconds, resolve with what we have
+        const savedTime = video.currentTime;
+        video.currentTime = Math.max(0, video.duration / 2);
         setTimeout(() => {
-          SourceBuffer.prototype.appendBuffer = origAppend;
-          if (videoInit || audioInit) {
-            window.__manifestInitSegments = { videoInit, audioInit };
-            resolve({ videoInit, audioInit });
-          } else {
-            resolve(null);
-          }
-        }, 10000);
+          video.currentTime = savedTime;
+          // Timeout: resolve with whatever we have after 8 seconds
+          setTimeout(() => {
+            SourceBuffer.prototype.appendBuffer = origAppend;
+            if (videoInit || audioInit) {
+              window.__manifestInitSegments = { videoInit, audioInit };
+              resolve({ videoInit, audioInit });
+            } else {
+              resolve(null);
+            }
+          }, 4000);
+        }, 2000);
       } else {
         resolve(null);
       }
     });
   };
 
-  // === Main Download Function ===
+  // === Segment Fetch + Decrypt ===
+
+  const fetchAndDecrypt = async (url, cryptoKey, algo) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SEGMENT_TIMEOUT);
+    const resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const encrypted = await resp.arrayBuffer();
+    return crypto.subtle.decrypt({ name: algo.name, iv: algo.iv || getCrypto().iv }, cryptoKey, encrypted);
+  };
+
+  const fetchAndDecryptRetry = async (url, key, algo, retries = 2) => {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try { return await fetchAndDecrypt(url, key, algo); }
+      catch (e) { if (attempt === retries) throw e; await new Promise(r => setTimeout(r, 1000 * (attempt + 1))); }
+    }
+  };
+
+  // === Parallel Download Engine ===
+
+  const downloadAllSegments = async (template, count, key, algo, onProgress, label) => {
+    const results = new Array(count);
+    let completed = 0, failed = 0;
+    const queue = Array.from({ length: count }, (_, i) => i);
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const i = queue.shift();
+        if (i === undefined) break;
+        const url = template.replace('{TIME}', i * SEGMENT_DURATION_MS).replace('%7BTIME%7D', i * SEGMENT_DURATION_MS);
+        try {
+          results[i] = await fetchAndDecryptRetry(url, key, algo);
+          completed++;
+        } catch (e) {
+          failed++;
+          completed++;
+        }
+        if (onProgress) onProgress({ completed, total: count, failed, label });
+      }
+    };
+
+    await Promise.all(Array.from({ length: MAX_CONCURRENT }, () => worker()));
+    return results;
+  };
+
+  // === Timestamp Fixer ===
+
+  /**
+   * Fix fragmented MP4 timestamps so each moof's tfdt.baseDecodeTime is sequential.
+   * Without this fix, every segment starts at time 0 and the video appears seconds long.
+   *
+   * Walks the MP4 box structure, finds each moof > traf > tfdt and trun,
+   * calculates correct cumulative timestamps based on sample count * sample duration.
+   */
+  const fixTimestamps = (data) => {
+    const buf = new DataView(data.buffer || data);
+    const bytes = new Uint8Array(data.buffer || data);
+    const total = bytes.length;
+    let pos = 0;
+    let currentTime = 0;
+    let lastSegDuration = 0;
+    let fixed = 0;
+
+    const readU32 = (p) => buf.getUint32(p);
+    const writeU32 = (p, v) => buf.setUint32(p, v);
+    const writeU64 = (p, v) => { buf.setUint32(p, Math.floor(v / 0x100000000)); buf.setUint32(p + 4, v >>> 0); };
+    const boxType = (p) => String.fromCharCode(bytes[p + 4], bytes[p + 5], bytes[p + 6], bytes[p + 7]);
+
+    while (pos < total - 8) {
+      const size = readU32(pos);
+      if (size < 8) break;
+      const type = boxType(pos);
+
+      if (type === 'moof') {
+        let inner = pos + 8;
+        while (inner < pos + size - 8) {
+          const iSize = readU32(inner);
+          if (iSize < 8) break;
+          const iType = boxType(inner);
+
+          if (iType === 'traf') {
+            let tp = inner + 8;
+            const trafEnd = inner + iSize;
+            let segSamples = 0, segSampleDur = 0;
+
+            while (tp < trafEnd - 8) {
+              const tSize = readU32(tp);
+              if (tSize < 8) break;
+              const tType = boxType(tp);
+
+              if (tType === 'tfdt') {
+                const version = bytes[tp + 8];
+                if (version === 1) {
+                  writeU64(tp + 12, currentTime);
+                } else {
+                  writeU32(tp + 12, currentTime);
+                }
+                fixed++;
+              }
+
+              if (tType === 'trun') {
+                const flags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
+                segSamples = readU32(tp + 12);
+                let offset = 16;
+                if (flags & 0x1) offset += 4; // data offset
+                if (flags & 0x4) offset += 4; // first sample flags
+                if (flags & 0x100) { // sample duration present
+                  segSampleDur = readU32(tp + offset);
+                }
+              }
+
+              tp += tSize;
+            }
+
+            // Advance current time by this segment's duration
+            if (segSamples > 0 && segSampleDur > 0) {
+              lastSegDuration = segSamples * segSampleDur;
+            }
+            currentTime += lastSegDuration;
+          }
+
+          inner += iSize;
+        }
+      }
+
+      pos += size;
+    }
+
+    return { data: bytes, fixed, finalTime: currentTime };
+  };
+
+  // === isAvailable ===
 
   const isAvailable = () => {
     return !!(findSegmentTemplates() && hasCryptoKey());
   };
 
-  /**
-   * Download the full video by fetching + decrypting all segments in parallel.
-   */
+  // === Main Download ===
+
   const download = async (onProgress) => {
     const templates = findSegmentTemplates();
     if (!templates) {
-      return { success: false, error: 'No segment templates found. Play the video briefly first.' };
+      return { success: false, error: 'No segment URLs found. Play the video for a few seconds first.' };
     }
 
     const cryptoData = getCrypto();
@@ -203,125 +282,100 @@
 
     const video = document.querySelector('video');
     const duration = video?.duration || 0;
-    if (!duration) {
-      return { success: false, error: 'Cannot determine video duration.' };
-    }
+    if (!duration) return { success: false, error: 'Cannot determine video duration.' };
 
-    const segmentCount = Math.ceil(duration / (SEGMENT_DURATION_MS / 1000));
+    const totalSegs = Math.ceil(duration / (SEGMENT_DURATION_MS / 1000));
+    const startTime = Date.now();
 
-    if (onProgress) onProgress({
-      stage: 'init',
-      message: `Preparing: ${segmentCount} segments to download (~${Math.round(duration / 60)} min video)`,
-      percent: 0
-    });
-
-    // Step 1: Capture init segments if we don't have them
+    // Step 1: Capture init segments
+    if (onProgress) onProgress({ stage: 'init', message: 'Capturing init segments...', percent: 0 });
     let initSegs = getInitSegments();
     if (!initSegs || !initSegs.videoInit) {
-      if (onProgress) onProgress({ stage: 'init', message: 'Capturing init segments (brief play)...', percent: 0 });
       initSegs = await captureInitSegments();
-      if (!initSegs || !initSegs.videoInit) {
-        return { success: false, error: 'Failed to capture init segments. Try playing the video briefly first.' };
+      if (!initSegs?.videoInit) {
+        return { success: false, error: 'Failed to capture init segments. Try seeking in the video first.' };
       }
     }
 
-    // Step 2: Download + decrypt all video segments
-    if (onProgress) onProgress({
-      stage: 'video',
-      message: `Downloading ${segmentCount} video segments...`,
-      percent: 0
-    });
+    // Step 2: Download + decrypt video segments
+    if (onProgress) onProgress({ stage: 'video', message: `Downloading ${totalSegs} video segments...`, percent: 0 });
+    const videoSegs = await downloadAllSegments(
+      templates.videoTemplate, totalSegs, cryptoData.key, cryptoData.algo,
+      (p) => { if (onProgress) onProgress({ stage: 'video', message: `Video: ${p.completed}/${p.total}`, percent: Math.round(p.completed / p.total * 50) }); },
+      'Video'
+    );
 
-    let videoSegments;
-    try {
-      videoSegments = await downloadAllSegments(
-        templates.videoTemplate,
-        segmentCount,
-        cryptoData.key,
-        cryptoData.algo,
-        (p) => {
-          if (onProgress) onProgress({
-            ...p,
-            percent: Math.round(p.percent * 0.6) // 0-60% for video
-          });
-        },
-        'Video'
-      );
-    } catch (e) {
-      return { success: false, error: `Video download failed: ${e.message}` };
-    }
+    // Step 3: Download + decrypt audio segments
+    if (onProgress) onProgress({ stage: 'audio', message: `Downloading ${totalSegs} audio segments...`, percent: 50 });
+    const audioSegs = await downloadAllSegments(
+      templates.audioTemplate, totalSegs, cryptoData.key, cryptoData.algo,
+      (p) => { if (onProgress) onProgress({ stage: 'audio', message: `Audio: ${p.completed}/${p.total}`, percent: 50 + Math.round(p.completed / p.total * 40) }); },
+      'Audio'
+    );
 
-    // Step 3: Download + decrypt all audio segments
-    if (onProgress) onProgress({ stage: 'audio', message: 'Downloading audio segments...', percent: 60 });
+    // Step 4: Combine and fix timestamps
+    if (onProgress) onProgress({ stage: 'fixing', message: 'Fixing timestamps...', percent: 90 });
 
-    let audioSegments;
-    try {
-      audioSegments = await downloadAllSegments(
-        templates.audioTemplate,
-        segmentCount,
-        cryptoData.key,
-        cryptoData.algo,
-        (p) => {
-          if (onProgress) onProgress({
-            ...p,
-            stage: 'Audio',
-            percent: 60 + Math.round(p.percent * 0.3) // 60-90% for audio
-          });
-        },
-        'Audio'
-      );
-    } catch (e) {
-      return { success: false, error: `Audio download failed: ${e.message}` };
-    }
+    const validVideoSegs = videoSegs.filter(Boolean);
+    const validAudioSegs = audioSegs.filter(Boolean);
 
-    // Step 4: Combine into playable file
-    if (onProgress) onProgress({ stage: 'combining', message: 'Combining video + audio...', percent: 90 });
+    // Build raw blobs
+    const rawVideoData = concatBuffers([initSegs.videoInit, ...validVideoSegs]);
+    const rawAudioData = concatBuffers([initSegs.audioInit, ...validAudioSegs]);
 
-    const fileName = getFileName('mp4');
+    // Fix timestamps
+    const fixedVideo = fixTimestamps(rawVideoData);
+    const fixedAudio = fixTimestamps(rawAudioData);
 
-    // Try MP4 muxer for combined file
-    if (window.MP4Muxer && initSegs.videoInit && initSegs.audioInit) {
-      try {
-        const combined = window.MP4Muxer.mux(
-          initSegs.videoInit, videoSegments,
-          initSegs.audioInit, audioSegments
-        );
-        const blob = new Blob([combined], { type: 'video/mp4' });
-        triggerDownload(blob, fileName);
+    if (onProgress) onProgress({ stage: 'saving', message: 'Preparing download...', percent: 95 });
 
-        if (onProgress) onProgress({
-          stage: 'done',
-          message: `Done! ${fileName} (${Math.round(blob.size / 1024 / 1024)}MB)`,
-          percent: 100
-        });
-        return { success: true, fileName, fileSize: blob.size, method: 'muxed' };
-      } catch (e) {
-        console.warn('[manifestDownload] Mux failed, downloading separately:', e.message);
-      }
-    }
+    const fileName = getFileName();
+    const vBlob = new Blob([fixedVideo.data], { type: 'video/mp4' });
+    const aBlob = new Blob([fixedAudio.data], { type: 'audio/mp4' });
+    const vMB = Math.round(vBlob.size / 1024 / 1024);
+    const aMB = Math.round(aBlob.size / 1024 / 1024);
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-    // Fallback: download video and audio separately
-    const vBlob = new Blob([initSegs.videoInit, ...videoSegments], { type: 'video/mp4' });
-    const aBlob = new Blob([initSegs.audioInit, ...audioSegments], { type: 'audio/mp4' });
-
-    triggerDownload(vBlob, getFileName('video.mp4'));
-    setTimeout(() => triggerDownload(aBlob, getFileName('audio.mp4')), 500);
+    // Download both files
+    triggerDownload(vBlob, fileName + '-video.mp4');
+    setTimeout(() => triggerDownload(aBlob, fileName + '-audio.mp4'), 500);
 
     if (onProgress) onProgress({
       stage: 'done',
-      message: `Done! Downloaded video (${Math.round(vBlob.size / 1024 / 1024)}MB) + audio (${Math.round(aBlob.size / 1024 / 1024)}MB) separately`,
+      message: `Done in ${elapsed}s! Video: ${vMB}MB, Audio: ${aMB}MB (${fixedVideo.fixed} segments fixed). Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy combined.mp4`,
       percent: 100
     });
 
-    return { success: true, method: 'separate', videoSize: vBlob.size, audioSize: aBlob.size };
+    return {
+      success: true,
+      method: 'manifestDecrypt',
+      videoSize: vBlob.size,
+      audioSize: aBlob.size,
+      segments: totalSegs,
+      elapsed,
+      fixed: fixedVideo.fixed
+    };
   };
 
   // === Helpers ===
 
-  const getFileName = (ext) => {
+  const concatBuffers = (buffers) => {
+    const totalLength = buffers.reduce((sum, b) => sum + (b ? b.byteLength || 0 : 0), 0);
+    const result = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const buf of buffers) {
+      if (buf) {
+        result.set(new Uint8Array(buf), offset);
+        offset += buf.byteLength;
+      }
+    }
+    return result;
+  };
+
+  const getFileName = () => {
     const title = document.querySelector('h1, h2, [class*="videoTitle"] label')
       ?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '')?.trim() || 'recording';
-    return `${title}.${ext}`;
+    return title;
   };
 
   const triggerDownload = (blob, filename) => {
@@ -347,7 +401,8 @@
     // Expose for debugging
     hasCryptoKey,
     findSegmentTemplates,
-    getInitSegments
+    getInitSegments,
+    fixTimestamps
   };
 
   console.log('[Teams Chat Exporter] Video download module loaded: manifestDownload');

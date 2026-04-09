@@ -262,71 +262,62 @@ const isTeamsPage = () => {
         return true;
 
       case 'downloadVideo':
-        // Use the new modular coordinator
+        // Inject a script into page world to call coordinator directly
         (() => {
-          const handler = (e) => {
-            if (e.detail?.command === 'download') {
-              document.removeEventListener('tceVideoDownloadResponse', handler);
-              sendResponse(e.detail.result || { error: 'No result' });
-            }
-          };
-          document.addEventListener('tceVideoDownloadResponse', handler);
-          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
-            detail: { command: 'download', data: request.data }
-          }));
-          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 600000);
-        })();
-        return true;
-
-      case 'getVideoDownloadUrl':
-        // Ask coordinator for a direct download URL (for popup)
-        (() => {
-          const handler = (e) => {
-            if (e.detail?.command === 'getDownloadUrl') {
-              document.removeEventListener('tceVideoDownloadResponse', handler);
-              const urlData = e.detail.result;
-              if (urlData && urlData.downloadUrl) {
-                sendResponse({
-                  downloadUrl: urlData.downloadUrl,
-                  fileName: urlData.fileName,
-                  fileSizeMB: urlData.fileSize ? Math.round(urlData.fileSize / 1024 / 1024) : null,
-                  source: 'driveApi'
-                });
-              } else {
-                sendResponse({ error: 'No direct download URL available' });
-              }
-            }
-          };
-          document.addEventListener('tceVideoDownloadResponse', handler);
-          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
-            detail: { command: 'getDownloadUrl' }
-          }));
-          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 10000);
+          const method = request.data?.method || '';
+          const script = document.createElement('script');
+          script.textContent = `(async()=>{
+            const c=window.__videoDownloadCoordinator;
+            if(!c){document.title='ERROR:no coordinator';return;}
+            const r=await c.download((p)=>{document.title=p.message||p.stage||'downloading...'},'${method}'||undefined);
+            document.title='DONE:'+JSON.stringify(r).substring(0,100);
+          })();`;
+          document.head.appendChild(script);
+          script.remove();
+          sendResponse({ status: 'download_started' });
         })();
         return true;
 
       case 'getVideoModules':
-        // Return available download methods (for popup UI)
+        // Read modules from page world via injected script + hidden div
         (() => {
-          const handler = (e) => {
-            if (e.detail?.command === 'getAvailableModules') {
-              document.removeEventListener('tceVideoDownloadResponse', handler);
-              sendResponse({ modules: e.detail.result || [] });
+          const resultDiv = document.createElement('div');
+          resultDiv.id = 'tce-video-modules-result';
+          resultDiv.style.display = 'none';
+          document.body.appendChild(resultDiv);
+
+          const script = document.createElement('script');
+          script.textContent = `(()=>{
+            const c=window.__videoDownloadCoordinator;
+            const div=document.getElementById('tce-video-modules-result');
+            if(c&&div){div.setAttribute('data-result',JSON.stringify(c.getAvailableModules()));}
+            else if(div){div.setAttribute('data-result','[]');}
+          })();`;
+          document.head.appendChild(script);
+          script.remove();
+
+          // Read result from the div
+          setTimeout(() => {
+            try {
+              const result = JSON.parse(resultDiv.getAttribute('data-result') || '[]');
+              resultDiv.remove();
+              sendResponse({ modules: result });
+            } catch (e) {
+              resultDiv.remove();
+              sendResponse({ modules: [] });
             }
-          };
-          document.addEventListener('tceVideoDownloadResponse', handler);
-          document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
-            detail: { command: 'getAvailableModules' }
-          }));
-          setTimeout(() => document.removeEventListener('tceVideoDownloadResponse', handler), 5000);
+          }, 100);
         })();
         return true;
 
       case 'stopVideoDownload':
-        document.dispatchEvent(new CustomEvent('tceVideoDownloadCommand', {
-          detail: { command: 'stop' }
-        }));
-        sendResponse({ stopped: true });
+        (() => {
+          const script = document.createElement('script');
+          script.textContent = `window.__videoDownloadCoordinator?.stop();`;
+          document.head.appendChild(script);
+          script.remove();
+          sendResponse({ stopped: true });
+        })();
         return true;
 
       case 'cancelBatchTranscript':
