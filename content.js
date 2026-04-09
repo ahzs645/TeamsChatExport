@@ -243,29 +243,36 @@ const isTeamsPage = () => {
         return true;
 
       case 'extractTranscript':
-        // Extract transcript and return data
-        const container = document.getElementById('teams-chat-exporter-transcript-data');
-        if (!container) {
-          sendResponse({
-            success: false,
-            error: 'Transcript not ready. Start playback to load the transcript.'
-          });
-          return true;
-        }
-        const vttData = container.getAttribute('data-vtt') || container.textContent;
-        const txtData = container.getAttribute('data-txt') || container.textContent;
+        // Extract transcript via API first, then DOM fallback
+        (async () => {
+          try {
+            const data = await getTranscriptData();
+            if (!data) {
+              sendResponse({
+                success: false,
+                error: 'Transcript not ready. Start playback to load the transcript.'
+              });
+              return;
+            }
 
-        // Get video title for filename
-        const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
-        const videoTitle = titleEl?.innerText?.trim() || document.title?.trim() || 'transcript';
-        const safeTitle = videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
+            const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
+            const videoTitle = titleEl?.innerText?.trim() || document.title?.trim() || 'transcript';
+            const safeTitle = videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
 
-        sendResponse({
-          success: true,
-          vtt: vttData,
-          txt: txtData,
-          title: safeTitle
-        });
+            sendResponse({
+              success: true,
+              vtt: data.vtt,
+              txt: data.txt,
+              title: safeTitle,
+              source: data.source || 'unknown'
+            });
+          } catch (err) {
+            sendResponse({
+              success: false,
+              error: 'Failed to extract transcript: ' + err.message
+            });
+          }
+        })();
         return true;
 
       default:
@@ -295,12 +302,169 @@ const isTeamsPage = () => {
     return videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
   };
 
-  const getTranscriptData = () => {
+  // === API-based transcript fetch (same approach as batch downloader) ===
+
+  const getAPIMetadata = () => {
+    if (window.__transcriptAPIData && Object.keys(window.__transcriptAPIData).length > 0) {
+      return { ...window.__transcriptAPIData };
+    }
+    const div = document.getElementById('transcript-api-data');
+    if (!div) return {};
+    try {
+      return JSON.parse(div.getAttribute('data-transcript-api') || '{}');
+    } catch (e) {
+      return {};
+    }
+  };
+
+  const getSharePointTokens = () => {
+    if (window.__sharePointTokens && Object.keys(window.__sharePointTokens).length > 0) {
+      return { ...window.__sharePointTokens };
+    }
+    const div = document.getElementById('transcript-api-data');
+    if (!div) return {};
+    try {
+      return JSON.parse(div.getAttribute('data-sp-tokens') || '{}');
+    } catch (e) {
+      return {};
+    }
+  };
+
+  const getTokenForUrl = (transcriptUrl) => {
+    const tokens = getSharePointTokens();
+    if (!transcriptUrl || Object.keys(tokens).length === 0) return null;
+    try {
+      const host = new URL(transcriptUrl).hostname;
+      const tokenEntry = tokens[host];
+      if (tokenEntry && tokenEntry.token) {
+        if (Date.now() - tokenEntry.capturedAt < 30 * 60 * 1000) {
+          return tokenEntry.token;
+        }
+      }
+    } catch (e) {}
+    return null;
+  };
+
+  const convertVttToTxt = (vttContent) => {
+    const lines = vttContent.split('\n');
+    const txtLines = [];
+    let currentTimestamp = '';
+    for (const line of lines) {
+      if (line.includes('-->')) {
+        currentTimestamp = line.split('-->')[0].trim().split('.')[0] || '00:00:00';
+      } else if (line.trim() && !line.startsWith('WEBVTT') && !line.startsWith('NOTE') && !line.match(/^\d+$/)) {
+        const vMatch = line.match(/^<v\s+([^>]+)>(.+)<\/v>$/);
+        if (vMatch) {
+          txtLines.push(`[${currentTimestamp}] ${vMatch[1]}: ${vMatch[2]}`);
+        } else if (line.trim()) {
+          txtLines.push(`[${currentTimestamp}] ${line.trim()}`);
+        }
+      }
+    }
+    return txtLines.join('\n') || vttContent;
+  };
+
+  const fetchTranscriptViaAPI = async (apiMeta) => {
+    if (!apiMeta || !apiMeta.resources) return null;
+
+    const transcriptResource =
+      apiMeta.resources['TranscriptV2'] ||
+      apiMeta.resources['transcriptV2'] ||
+      Object.values(apiMeta.resources).find((r) =>
+        r.location && r.location.includes('transcript')
+      );
+
+    if (!transcriptResource || !transcriptResource.location) return null;
+
+    const transcriptUrl = transcriptResource.location;
+    const token = getTokenForUrl(transcriptUrl);
+    if (!token) return null;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      const response = await fetch(transcriptUrl, {
+        headers: { 'Authorization': token },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) return null;
+
+      const contentType = response.headers.get('content-type') || '';
+      const text = await response.text();
+      if (!text || text.length < 10) return null;
+
+      let vtt = '';
+      let txt = '';
+
+      if (text.startsWith('WEBVTT')) {
+        vtt = text;
+        txt = convertVttToTxt(text);
+      } else if (contentType.includes('json') || text.startsWith('{') || text.startsWith('[')) {
+        try {
+          const data = JSON.parse(text);
+          const entries = Array.isArray(data) ? data : (data.entries || data.captions || []);
+          if (entries.length > 0) {
+            const utils = window.__teamsTranscriptUtils;
+            if (utils) {
+              vtt = utils.buildVttTranscript(entries);
+              txt = utils.buildTxtTranscript(entries);
+            } else {
+              txt = entries.map((e) => {
+                const ts = e.startOffset || e.offset || '00:00:00';
+                const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+                const content = e.text || e.content || '';
+                return `[${ts}] ${speaker}: ${content}`;
+              }).join('\n');
+              vtt = 'WEBVTT\n\n' + entries.map((e, i) => {
+                const ts = e.startOffset || e.offset || '00:00:00';
+                const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+                const content = e.text || e.content || '';
+                return `${i + 1}\n${ts}.000 --> ${ts}.000\n<v ${speaker}>${content}</v>`;
+              }).join('\n\n');
+            }
+          }
+        } catch (e) {
+          return null;
+        }
+      } else {
+        txt = text;
+        vtt = 'WEBVTT\n\nNOTE Raw transcript from API\n\n1\n00:00:00.000 --> 99:59:59.000\n' + text;
+      }
+
+      if (!vtt && !txt) return null;
+      return { vtt, txt, source: 'api' };
+    } catch (err) {
+      console.error('[Teams Chat Extractor] API fetch failed:', err);
+      return null;
+    }
+  };
+
+  // Try API-based fetch first (complete transcript), fall back to DOM (visible only)
+  const getTranscriptData = async () => {
+    // Try API approach first - gets complete transcript from SharePoint
+    const allMeta = getAPIMetadata();
+    const metaKeys = Object.keys(allMeta);
+    if (metaKeys.length > 0) {
+      // Use the most recent metadata entry
+      const latestKey = metaKeys[metaKeys.length - 1];
+      const apiResult = await fetchTranscriptViaAPI(allMeta[latestKey]);
+      if (apiResult) {
+        console.log('[Teams Chat Extractor] Using API-fetched transcript (complete)');
+        return apiResult;
+      }
+    }
+
+    // Fall back to DOM extraction (visible entries only)
     const container = document.getElementById('teams-chat-exporter-transcript-data');
     if (!container) return null;
+    console.log('[Teams Chat Extractor] Falling back to DOM transcript (visible only)');
     return {
       vtt: container.getAttribute('data-vtt') || container.textContent,
-      txt: container.getAttribute('data-txt') || container.textContent
+      txt: container.getAttribute('data-txt') || container.textContent,
+      source: 'dom'
     };
   };
 
@@ -316,7 +480,7 @@ const isTeamsPage = () => {
 
   // Copy transcript handler
   const handleCopy = async (btn) => {
-    const data = getTranscriptData();
+    const data = await getTranscriptData();
     if (!data) {
       alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
       return;
@@ -340,8 +504,8 @@ const isTeamsPage = () => {
   };
 
   // Download VTT handler
-  const handleDownloadVTT = () => {
-    const data = getTranscriptData();
+  const handleDownloadVTT = async () => {
+    const data = await getTranscriptData();
     if (!data) {
       alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
       return;
@@ -350,8 +514,8 @@ const isTeamsPage = () => {
   };
 
   // Download TXT handler
-  const handleDownloadTXT = () => {
-    const data = getTranscriptData();
+  const handleDownloadTXT = async () => {
+    const data = await getTranscriptData();
     if (!data) {
       alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
       return;
