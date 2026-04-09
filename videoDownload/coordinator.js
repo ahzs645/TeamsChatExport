@@ -169,14 +169,36 @@
 
     if (command === 'download') {
       console.log('[VideoCoordinator] Download command received, method:', method || 'auto');
+
+      // Create visible progress panel
+      let panel = document.getElementById('tce-download-progress');
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'tce-download-progress';
+        panel.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99999;padding:16px 24px;background:rgba(0,0,0,0.92);color:white;border-radius:10px;font-family:monospace;font-size:13px;min-width:500px;text-align:center;';
+        panel.innerHTML = '<div id="tce-dl-status">Starting...</div>' +
+          '<div style="background:#333;height:20px;border-radius:10px;margin:8px 0;overflow:hidden">' +
+          '<div id="tce-dl-bar" style="background:#28a745;height:100%;width:0%;transition:width 0.3s"></div></div>' +
+          '<div id="tce-dl-detail"></div>';
+        document.body.appendChild(panel);
+      }
+
       download(
-        (progress) => { document.title = progress.message || progress.stage || 'downloading...'; },
+        (progress) => {
+          const statusEl = document.getElementById('tce-dl-status');
+          const barEl = document.getElementById('tce-dl-bar');
+          if (statusEl) statusEl.textContent = progress.message || progress.stage || 'working...';
+          if (barEl && progress.percent !== undefined) barEl.style.width = progress.percent + '%';
+        },
         method || undefined
       ).then((result) => {
-        document.title = 'DONE: ' + JSON.stringify(result).substring(0, 100);
         console.log('[VideoCoordinator] Download result:', result);
+        // Panel with save buttons is created by manifestDownload itself
+        const progressPanel = document.getElementById('tce-download-progress');
+        if (progressPanel) progressPanel.remove();
       }).catch((err) => {
-        document.title = 'ERROR: ' + err.message;
+        const statusEl = document.getElementById('tce-dl-status');
+        if (statusEl) statusEl.textContent = 'ERROR: ' + err.message;
         console.error('[VideoCoordinator] Download error:', err);
       });
     } else if (command === 'stop') {

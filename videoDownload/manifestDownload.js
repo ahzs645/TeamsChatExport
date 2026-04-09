@@ -184,14 +184,32 @@
    * Walks the MP4 box structure, finds each moof > traf > tfdt and trun,
    * calculates correct cumulative timestamps based on sample count * sample duration.
    */
-  const fixTimestamps = (data) => {
+  /**
+   * Find the timescale from the init segment's mdhd box.
+   */
+  const findTimescale = (data) => {
+    const bytes = new Uint8Array(data.buffer || data);
+    for (let i = 0; i < Math.min(bytes.length, 2000) - 20; i++) {
+      if (bytes[i+4] === 0x6d && bytes[i+5] === 0x64 && bytes[i+6] === 0x68 && bytes[i+7] === 0x64) { // 'mdhd'
+        const ver = bytes[i + 8];
+        if (ver === 0) return new DataView(bytes.buffer, bytes.byteOffset + i + 20, 4).getUint32(0);
+        else return new DataView(bytes.buffer, bytes.byteOffset + i + 28, 4).getUint32(0);
+      }
+    }
+    return 16000; // fallback
+  };
+
+  const fixTimestamps = (data, segmentDurationMs) => {
     const buf = new DataView(data.buffer || data);
     const bytes = new Uint8Array(data.buffer || data);
     const total = bytes.length;
     let pos = 0;
     let currentTime = 0;
-    let lastSegDuration = 0;
     let fixed = 0;
+
+    // Calculate the correct duration per segment in timescale units
+    const timescale = findTimescale(data);
+    const segDurationTs = Math.round((segmentDurationMs || SEGMENT_DURATION_MS) / 1000 * timescale);
 
     const readU32 = (p) => buf.getUint32(p);
     const writeU32 = (p, v) => buf.setUint32(p, v);
@@ -213,7 +231,6 @@
           if (iType === 'traf') {
             let tp = inner + 8;
             const trafEnd = inner + iSize;
-            let segSamples = 0, segSampleDur = 0, defaultDuration = 0;
 
             while (tp < trafEnd - 8) {
               const tSize = readU32(tp);
@@ -230,37 +247,12 @@
                 fixed++;
               }
 
-              if (tType === 'tfhd') {
-                // Check for default_sample_duration (flag 0x8)
-                const tfhdFlags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
-                let tfhdOff = 16; // skip box header(8) + version+flags(4) + trackId(4)
-                if (tfhdFlags & 0x1) tfhdOff += 8;  // base_data_offset
-                if (tfhdFlags & 0x2) tfhdOff += 4;  // sample_description_index
-                if (tfhdFlags & 0x8) {               // default_sample_duration
-                  defaultDuration = readU32(tp + tfhdOff);
-                }
-              }
-
-              if (tType === 'trun') {
-                const trunFlags = (bytes[tp + 9] << 16) | (bytes[tp + 10] << 8) | bytes[tp + 11];
-                segSamples = readU32(tp + 12);
-                let trunOff = 16;
-                if (trunFlags & 0x1) trunOff += 4; // data offset
-                if (trunFlags & 0x4) trunOff += 4; // first sample flags
-                if (trunFlags & 0x100) {             // per-sample duration
-                  segSampleDur = readU32(tp + trunOff);
-                }
-              }
-
               tp += tSize;
             }
 
-            // Use per-sample duration from trun, or default from tfhd
-            const effectiveDuration = segSampleDur || defaultDuration;
-            if (segSamples > 0 && effectiveDuration > 0) {
-              lastSegDuration = segSamples * effectiveDuration;
-            }
-            currentTime += lastSegDuration;
+            // Use the known segment duration (from URL interval) rather than tfhd/trun
+            // which can report inflated values
+            currentTime += segDurationTs;
           }
 
           inner += iSize;
