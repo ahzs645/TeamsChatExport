@@ -343,8 +343,14 @@
     // Show save buttons (large blob downloads need user gesture)
     const panel = document.createElement('div');
     panel.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99999;padding:16px 24px;background:rgba(0,0,0,0.92);color:white;border-radius:10px;font-family:monospace;font-size:13px;min-width:500px;text-align:center;';
-    panel.innerHTML = `<div>Done in ${elapsed}s! ${fixedVideo.fixed} segments, timestamps fixed.</div>` +
-      `<div style="margin:6px 0;font-size:11px;color:#aaa;">Merge with: ffmpeg -i video.mp4 -i audio.mp4 -c copy combined.mp4</div>` +
+    const vName = fileName + '-video.mp4';
+    const aName = fileName + '-audio.mp4';
+    const cName = fileName + '.mp4';
+    const ffmpegCmd = `ffmpeg -i "${vName}" -c copy "${fileName}-video-fixed.mp4" && ffmpeg -i "${aName}" -c copy "${fileName}-audio-fixed.mp4" && ffmpeg -i "${fileName}-video-fixed.mp4" -i "${fileName}-audio-fixed.mp4" -c copy -movflags +faststart "${cName}"`;
+
+    panel.innerHTML = `<div style="font-size:15px;font-weight:bold;">Done in ${elapsed}s! ${fixedVideo.fixed} segments downloaded.</div>` +
+      `<div style="margin:8px 0;font-size:12px;color:#ffa;">After saving, run this to combine video+audio into one playable file:</div>` +
+      `<div style="background:#222;padding:8px;border-radius:4px;margin:4px 0;font-size:10px;word-break:break-all;cursor:pointer;text-align:left;" id="tce-ffmpeg-cmd" title="Click to copy">cd ~/Downloads && ffmpeg -i "${vName}" -c copy v.mp4 && ffmpeg -i "${aName}" -c copy a.mp4 && ffmpeg -i v.mp4 -i a.mp4 -c copy -movflags +faststart "${cName}" && rm v.mp4 a.mp4</div>` +
       `<div style="margin-top:10px;display:flex;gap:8px;justify-content:center;"></div>`;
     const btnRow = panel.lastElementChild;
 
@@ -365,6 +371,18 @@
 
     btnRow.appendChild(makeSaveBtn(`Save Video (${vMB}MB)`, vBlob, fileName + '-video.mp4', '#28a745'));
     btnRow.appendChild(makeSaveBtn(`Save Audio (${aMB}MB)`, aBlob, fileName + '-audio.mp4', '#007bff'));
+
+    // Click-to-copy for ffmpeg command
+    const cmdEl = panel.querySelector('#tce-ffmpeg-cmd');
+    if (cmdEl) {
+      cmdEl.onclick = () => {
+        navigator.clipboard.writeText(cmdEl.textContent).then(() => {
+          cmdEl.style.borderColor = '#28a745';
+          cmdEl.style.border = '1px solid #28a745';
+          setTimeout(() => { cmdEl.style.border = 'none'; }, 1500);
+        });
+      };
+    }
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '\u00D7';
