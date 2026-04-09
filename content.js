@@ -68,6 +68,7 @@ const isTeamsPage = () => {
     injectScript('videoDownload/directDownload.js', 'Video direct download');
     injectScript('videoDownload/manifestDownload.js', 'Video manifest download');
     injectScript('videoDownload/captureStreamDownload.js', 'Video capture stream');
+    injectScript('videoDownload/fmp4ToMp4.js', 'fMP4 to MP4 converter');
     injectScript('videoDownload/coordinator.js', 'Video download coordinator');
   }
 

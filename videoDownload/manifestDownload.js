@@ -21,7 +21,8 @@
   const MODULE_NAME = 'manifestDownload';
   const MAX_CONCURRENT = 6;
   const SEGMENT_TIMEOUT = 30000;
-  const SEGMENT_DURATION_MS = 2000;
+  const SEGMENT_FETCH_INTERVAL_MS = 2000; // URL parameter interval
+  let ACTUAL_SEGMENT_DURATION_MS = 0;     // Real content duration per segment (detected at runtime)
 
   // === Crypto Access ===
 
@@ -129,6 +130,38 @@
     });
   };
 
+  // === Segment Duration Detection ===
+
+  /**
+   * Detect the real content duration of a segment by reading tfhd + trun.
+   * Returns duration in milliseconds.
+   */
+  const detectSegmentDuration = (decryptedData, timescale) => {
+    const d = new Uint8Array(decryptedData);
+    let defaultDur = 0, sampleCount = 0;
+
+    for (let i = 0; i < d.length - 16; i++) {
+      const bt = String.fromCharCode(d[i+4], d[i+5], d[i+6], d[i+7]);
+      if (bt === 'tfhd') {
+        const fl = (d[i+9] << 16) | (d[i+10] << 8) | d[i+11];
+        let o = i + 16;
+        if (fl & 0x1) o += 8;
+        if (fl & 0x2) o += 4;
+        if (fl & 0x8) defaultDur = readU32(d, o);
+      }
+      if (bt === 'trun') {
+        sampleCount = readU32(d, i + 12);
+      }
+    }
+
+    if (defaultDur > 0 && sampleCount > 0 && timescale > 0) {
+      return Math.round(defaultDur * sampleCount / timescale * 1000);
+    }
+    return 0;
+  };
+
+  const readU32 = (d, p) => (d[p] << 24) | (d[p+1] << 16) | (d[p+2] << 8) | d[p+3];
+
   // === Segment Fetch + Decrypt ===
 
   const fetchAndDecrypt = async (url, cryptoKey, algo) => {
@@ -159,7 +192,8 @@
       while (queue.length > 0) {
         const i = queue.shift();
         if (i === undefined) break;
-        const url = template.replace('{TIME}', i * SEGMENT_DURATION_MS).replace('%7BTIME%7D', i * SEGMENT_DURATION_MS);
+        const segTime = i * (ACTUAL_SEGMENT_DURATION_MS || SEGMENT_FETCH_INTERVAL_MS);
+        const url = template.replace('{TIME}', segTime).replace('%7BTIME%7D', segTime);
         try {
           results[i] = await fetchAndDecryptRetry(url, key, algo);
           completed++;
@@ -209,7 +243,7 @@
 
     // Calculate the correct duration per segment in timescale units
     const timescale = findTimescale(data);
-    const segDurationTs = Math.round((segmentDurationMs || SEGMENT_DURATION_MS) / 1000 * timescale);
+    const segDurationTs = Math.round((segmentDurationMs || ACTUAL_SEGMENT_DURATION_MS || SEGMENT_FETCH_INTERVAL_MS) / 1000 * timescale);
 
     const readU32 = (p) => buf.getUint32(p);
     const writeU32 = (p, v) => buf.setUint32(p, v);
@@ -288,8 +322,26 @@
     const duration = video?.duration || 0;
     if (!duration) return { success: false, error: 'Cannot determine video duration.' };
 
-    const totalSegs = Math.ceil(duration / (SEGMENT_DURATION_MS / 1000));
     const startTime = Date.now();
+
+    // Step 0: Detect real segment content duration from first segment
+    if (onProgress) onProgress({ stage: 'detect', message: 'Detecting segment duration...', percent: 0 });
+    let segIntervalMs = SEGMENT_FETCH_INTERVAL_MS; // default: 2000ms
+    try {
+      const testUrl = templates.videoTemplate.replace('{TIME}', '0').replace('%7BTIME%7D', '0');
+      const testDec = await fetchAndDecrypt(testUrl, cryptoData.key, cryptoData.algo);
+      const initTimescale = findTimescale(getInitSegments()?.videoInit ? new Uint8Array(getInitSegments().videoInit) : new Uint8Array(0));
+      const detectedMs = detectSegmentDuration(testDec, initTimescale || 16000);
+      if (detectedMs > 0) {
+        segIntervalMs = detectedMs;
+        console.log(`[manifestDownload] Detected segment duration: ${detectedMs}ms (fetching every ${detectedMs}ms instead of ${SEGMENT_FETCH_INTERVAL_MS}ms)`);
+      }
+    } catch (e) {
+      console.warn('[manifestDownload] Could not detect segment duration, using default', e);
+    }
+
+    ACTUAL_SEGMENT_DURATION_MS = segIntervalMs;
+    const totalSegs = Math.ceil(duration * 1000 / segIntervalMs);
 
     // Step 1: Capture init segments
     if (onProgress) onProgress({ stage: 'init', message: 'Capturing init segments...', percent: 0 });
@@ -328,14 +380,34 @@
     const rawAudioData = concatBuffers([initSegs.audioInit, ...validAudioSegs]);
 
     // Fix timestamps
-    const fixedVideo = fixTimestamps(rawVideoData);
-    const fixedAudio = fixTimestamps(rawAudioData);
+    const fixedVideo = fixTimestamps(rawVideoData, ACTUAL_SEGMENT_DURATION_MS);
+    const fixedAudio = fixTimestamps(rawAudioData, ACTUAL_SEGMENT_DURATION_MS);
 
-    if (onProgress) onProgress({ stage: 'saving', message: 'Preparing download...', percent: 95 });
+    // Step 5: Convert fMP4 to standard MP4 (for QuickTime compatibility)
+    if (onProgress) onProgress({ stage: 'converting', message: 'Converting to standard MP4...', percent: 93 });
 
     const fileName = getFileName();
-    const vBlob = new Blob([fixedVideo.data], { type: 'video/mp4' });
-    const aBlob = new Blob([fixedAudio.data], { type: 'audio/mp4' });
+    let vBlob, aBlob;
+
+    if (window.__fmp4ToMp4) {
+      try {
+        const timescale = findTimescale(fixedVideo.data);
+        const videoMp4 = window.__fmp4ToMp4.convert(fixedVideo.data, timescale, ACTUAL_SEGMENT_DURATION_MS);
+        vBlob = new Blob([videoMp4], { type: 'video/mp4' });
+        if (onProgress) onProgress({ stage: 'converting', message: 'Converting audio...', percent: 96 });
+        const audioTimescale = findTimescale(fixedAudio.data);
+        const audioMp4 = window.__fmp4ToMp4.convert(fixedAudio.data, audioTimescale, ACTUAL_SEGMENT_DURATION_MS);
+        aBlob = new Blob([audioMp4], { type: 'audio/mp4' });
+        console.log('[manifestDownload] Converted to standard MP4 (video: ' + Math.round(vBlob.size/1024/1024) + 'MB, audio: ' + Math.round(aBlob.size/1024/1024) + 'MB)');
+      } catch (e) {
+        console.warn('[manifestDownload] fMP4 to MP4 conversion failed, using raw fMP4:', e.message);
+        vBlob = new Blob([fixedVideo.data], { type: 'video/mp4' });
+        aBlob = new Blob([fixedAudio.data], { type: 'audio/mp4' });
+      }
+    } else {
+      vBlob = new Blob([fixedVideo.data], { type: 'video/mp4' });
+      aBlob = new Blob([fixedAudio.data], { type: 'audio/mp4' });
+    }
     const vMB = Math.round(vBlob.size / 1024 / 1024);
     const aMB = Math.round(aBlob.size / 1024 / 1024);
     const elapsed = Math.round((Date.now() - startTime) / 1000);

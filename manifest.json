@@ -42,6 +42,6 @@
   "version": "6.5",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js", "videoDownload/directDownload.js", "videoDownload/manifestDownload.js", "videoDownload/captureStreamDownload.js", "videoDownload/coordinator.js" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js", "videoDownload/directDownload.js", "videoDownload/manifestDownload.js", "videoDownload/captureStreamDownload.js", "videoDownload/coordinator.js", "videoDownload/fmp4ToMp4.js" ]
   } ]
 }
