@@ -28,8 +28,96 @@
   };
 
   const isAvailable = () => {
-    const st = getStatus();
-    return !!(st && (st.hasVideo || st.hasAudio));
+    // Available whenever there's a media element with a known duration —
+    // we can prebuffer it ourselves at 16x to populate the MSE buffers.
+    const el = document.querySelector('video, audio');
+    return !!(el && isFinite(el.duration) && el.duration > 0);
+  };
+
+  const formatTime = (s) => {
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${String(sec).padStart(2, '0')}`;
+  };
+
+  /**
+   * Drive the media element from 0 → duration at 16x so the page's DASH
+   * player demands every segment. Our SourceBuffer.appendBuffer hook then
+   * captures each one as it's fed to MSE.
+   *
+   * Clears existing MSE buffers first so the resulting set is exactly one
+   * clean pass — otherwise re-played segments would duplicate.
+   */
+  const prebufferAt16x = async (onProgress) => {
+    const video = document.querySelector('video, audio');
+    if (!video) return { ok: false, error: 'No media element found' };
+    const duration = video.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      return { ok: false, error: 'Duration unknown — start playback once, then retry' };
+    }
+
+    const cap = getCapture();
+    cap?.clear?.();
+
+    const orig = {
+      currentTime: video.currentTime,
+      playbackRate: video.playbackRate,
+      muted: video.muted,
+      paused: video.paused,
+    };
+
+    video.muted = true;
+    try { video.currentTime = 0; } catch (_) {}
+    video.playbackRate = 16;
+
+    try {
+      await video.play();
+    } catch (e) {
+      video.playbackRate = orig.playbackRate;
+      video.muted = orig.muted;
+      return { ok: false, error: 'Autoplay blocked — click the play button on the page once, then retry' };
+    }
+
+    await new Promise((resolve) => {
+      let lastTime = -1;
+      let stuckTicks = 0;
+      const tick = setInterval(() => {
+        const t = video.currentTime;
+        if (onProgress) onProgress({
+          stage: 'prebuffering',
+          message: `Fast-play 16x: ${formatTime(t)} / ${formatTime(duration)}`,
+          percent: Math.min(60, Math.round((t / duration) * 60)),
+        });
+
+        if (video.ended || t >= duration - 0.25) {
+          clearInterval(tick);
+          resolve();
+          return;
+        }
+        if (Math.abs(t - lastTime) < 0.05) {
+          stuckTicks++;
+          if (stuckTicks > 24) { // ~6s of no progress → bail
+            clearInterval(tick);
+            resolve();
+            return;
+          }
+        } else {
+          stuckTicks = 0;
+        }
+        lastTime = t;
+      }, 250);
+    });
+
+    // Brief wait so the trailing appendBuffer for the tail segment lands.
+    await new Promise((r) => setTimeout(r, 600));
+
+    video.pause();
+    video.playbackRate = orig.playbackRate;
+    video.muted = orig.muted;
+    try { video.currentTime = orig.currentTime; } catch (_) {}
+    if (!orig.paused) video.play().catch(() => {});
+
+    return { ok: true };
   };
 
   const getFileName = (ext) => {
@@ -56,7 +144,12 @@
       return { success: false, error: 'Capture API not available' };
     }
 
-    if (onProgress) onProgress({ stage: 'assembling', message: 'Assembling captured segments...', percent: 30 });
+    // Step 1: drive playback at 16x so MSE receives every segment.
+    if (onProgress) onProgress({ stage: 'prebuffering', message: 'Starting 16x prebuffer...', percent: 0 });
+    const pre = await prebufferAt16x(onProgress);
+    if (!pre.ok) return { success: false, error: pre.error };
+
+    if (onProgress) onProgress({ stage: 'assembling', message: 'Assembling captured segments...', percent: 70 });
 
     const { videoBlob, audioBlob, videoCount, audioCount, source, hasMseInit } = cap.getBlobs();
 
