@@ -7,8 +7,9 @@
  */
 (() => {
   const MODULE_NAME = 'captureStreamDownload';
-  const DEFAULT_VIDEO_BITRATE = 5000000; // 5 Mbps
-  const DEFAULT_AUDIO_BITRATE = 128000;  // 128 kbps
+  const DEFAULT_VIDEO_BITRATE = 5000000;       // 5 Mbps
+  const DEFAULT_AUDIO_BITRATE = 128000;        // 128 kbps (with video)
+  const DEFAULT_AUDIO_ONLY_BITRATE = 320000;   // 320 kbps (audio-only, matches high-quality MP3)
   const MAX_PLAYBACK_RATE = 16;
 
   let activeRecorder = null;
@@ -18,16 +19,26 @@
 
   /**
    * Get the best supported MIME type for recording.
+   * Picks an audio-only container when the stream has no video tracks,
+   * otherwise picks a video container.
    */
-  const getBestMimeType = () => {
-    const types = [
-      'video/webm;codecs=vp9,opus',
-      'video/webm;codecs=vp8,opus',
-      'video/webm;codecs=h264,opus',
-      'video/webm',
-      'video/mp4'
-    ];
-    return types.find(t => MediaRecorder.isTypeSupported(t)) || 'video/webm';
+  const getBestMimeType = (audioOnly = false) => {
+    const types = audioOnly
+      ? [
+          'audio/webm;codecs=opus',
+          'audio/mp4;codecs=mp4a.40.2', // Chrome 130+
+          'audio/webm',
+          'audio/mp4'
+        ]
+      : [
+          'video/webm;codecs=vp9,opus',
+          'video/webm;codecs=vp8,opus',
+          'video/webm;codecs=h264,opus',
+          'video/webm',
+          'video/mp4'
+        ];
+    return types.find(t => MediaRecorder.isTypeSupported(t))
+      || (audioOnly ? 'audio/webm' : 'video/webm');
   };
 
   /**
@@ -65,9 +76,7 @@
       return { success: false, error: 'No video element found' };
     }
 
-    const playbackRate = options.playbackRate || MAX_PLAYBACK_RATE;
     const videoBitrate = options.videoBitrate || DEFAULT_VIDEO_BITRATE;
-    const audioBitrate = options.audioBitrate || DEFAULT_AUDIO_BITRATE;
     const duration = video.duration || 0;
 
     if (!duration || duration === Infinity) {
@@ -83,16 +92,21 @@
           return;
         }
 
-        const mimeType = getBestMimeType();
+        const hasVideoTrack = stream.getVideoTracks().length > 0;
+        const audioOnly = !hasVideoTrack;
+        const mimeType = getBestMimeType(audioOnly);
+        const audioBitrate = options.audioBitrate
+          || (audioOnly ? DEFAULT_AUDIO_ONLY_BITRATE : DEFAULT_AUDIO_BITRATE);
+        // Audio is captured in real time, so high playback rates produce sped-up output.
+        // Force 1x for audio-only recordings.
+        const playbackRate = audioOnly ? 1 : (options.playbackRate || MAX_PLAYBACK_RATE);
         activeChunks = [];
         isRecording = true;
         recordingStartTime = Date.now();
 
-        activeRecorder = new MediaRecorder(stream, {
-          mimeType,
-          videoBitsPerSecond: videoBitrate,
-          audioBitsPerSecond: audioBitrate
-        });
+        const recorderOptions = { mimeType, audioBitsPerSecond: audioBitrate };
+        if (!audioOnly) recorderOptions.videoBitsPerSecond = videoBitrate;
+        activeRecorder = new MediaRecorder(stream, recorderOptions);
 
         activeRecorder.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) {
@@ -112,7 +126,9 @@
           }
 
           const blob = new Blob(activeChunks, { type: mimeType });
-          const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+          const ext = mimeType.startsWith('audio/')
+            ? (mimeType.includes('mp4') ? 'm4a' : 'webm')
+            : (mimeType.includes('mp4') ? 'mp4' : 'webm');
           const filename = getFileName(ext);
 
           if (onProgress) onProgress({

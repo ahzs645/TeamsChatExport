@@ -67,6 +67,7 @@ const isTeamsPage = () => {
     // Inject modular video download modules
     injectScript('videoDownload/directDownload.js', 'Video direct download');
     injectScript('videoDownload/manifestDownload.js', 'Video manifest download');
+    injectScript('videoDownload/mseCaptureDownload.js', 'Video MSE capture download');
     injectScript('videoDownload/captureStreamDownload.js', 'Video capture stream');
     injectScript('videoDownload/fmp4ToMp4.js', 'fMP4 to MP4 converter');
     injectScript('videoDownload/coordinator.js', 'Video download coordinator');
@@ -301,6 +302,12 @@ const isTeamsPage = () => {
               label: 'Fast Download',
               description: 'Parallel fetch + decrypt (play video briefly first)',
               available: hasTemplates
+            },
+            {
+              name: 'mseCaptureDownload',
+              label: 'Save MSE Capture',
+              description: 'Save exact decrypted bytes the browser played (no re-fetch)',
+              available: hasVideo
             },
             {
               name: 'captureStreamDownload',

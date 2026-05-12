@@ -17,6 +17,13 @@
   let isCapturing = false;
   let downloadAsCapture = false;
 
+  // MSE capture runs independently of isCapturing so the appendBuffer hook
+  // can grab the decrypted bytes the moment they're fed to MSE — before the
+  // user has clicked Download. Bounded by a FIFO cap so long meetings don't OOM.
+  let isMseCapturing = true;
+  let mseCapturedBytes = 0;
+  const MSE_MAX_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
+
   // Captured auth tokens and URL templates
   let capturedVideoToken = null;
   let capturedAudioToken = null;
@@ -260,10 +267,22 @@
     return 'unknown';
   };
 
+  // Evict oldest media segments (keep init) when over the MSE memory cap.
+  const enforceMseCap = () => {
+    while (mseCapturedBytes > MSE_MAX_BYTES) {
+      const dropFrom = mseVideoBuffers.length >= mseAudioBuffers.length
+        ? mseVideoBuffers
+        : mseAudioBuffers;
+      if (dropFrom.length === 0) break;
+      const dropped = dropFrom.shift();
+      mseCapturedBytes -= dropped.byteLength;
+    }
+  };
+
   // Hook into SourceBuffer.appendBuffer
   const originalAppendBuffer = SourceBuffer.prototype.appendBuffer;
   SourceBuffer.prototype.appendBuffer = function(data) {
-    if (isCapturing && data) {
+    if (isMseCapturing && data) {
       try {
         // Convert to ArrayBuffer if needed
         let buffer;
@@ -295,14 +314,17 @@
             }
           } else {
             // Store media segment
+            const copy = buffer.slice(0);
             if (trackType === 'audio') {
-              mseAudioBuffers.push(buffer.slice(0));
+              mseAudioBuffers.push(copy);
               stats.audioCount = mseAudioBuffers.length;
             } else {
-              mseVideoBuffers.push(buffer.slice(0));
+              mseVideoBuffers.push(copy);
               stats.videoCount = mseVideoBuffers.length;
               mseSegmentIndex++;
             }
+            mseCapturedBytes += copy.byteLength;
+            enforceMseCap();
             dispatchUpdate();
           }
         }
@@ -620,6 +642,7 @@
       mseAudioBuffers.length = 0;
       mseVideoInit = null;
       mseAudioInit = null;
+      mseCapturedBytes = 0;
       stats = { videoCount: 0, audioCount: 0, videoPending: 0, audioPending: 0, maxTime: 0, errors: 0 };
       console.log('[Teams Video] Capture started (MSE + fetch interception)');
       dispatchUpdate();
@@ -638,6 +661,19 @@
 
     // Check if capturing
     isCapturing: () => isCapturing,
+
+    // Control MSE always-on capture independently of the fetch path.
+    setMseCapturing: (on) => { isMseCapturing = !!on; return isMseCapturing; },
+    isMseCapturing: () => isMseCapturing,
+    getMseUsage: () => ({ bytes: mseCapturedBytes, cap: MSE_MAX_BYTES }),
+
+    // Raw access to the captured MSE arrays for downstream muxing.
+    getMseRaw: () => ({
+      videoInit: mseVideoInit,
+      videoSegments: mseVideoBuffers.slice(),
+      audioInit: mseAudioInit,
+      audioSegments: mseAudioBuffers.slice(),
+    }),
 
     // Get current stats
     getStats: () => ({
@@ -845,6 +881,7 @@
       mseAudioBuffers.length = 0;
       mseVideoInit = null;
       mseAudioInit = null;
+      mseCapturedBytes = 0;
       mseSegmentIndex = 0;
       // Clear other state
       capturedVideoToken = null;

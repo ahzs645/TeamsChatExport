@@ -6,7 +6,7 @@
  */
 (() => {
   // Priority order: fastest/best quality first, most compatible last
-  const METHOD_PRIORITY = ['directDownload', 'manifestDownload', 'captureStreamDownload'];
+  const METHOD_PRIORITY = ['directDownload', 'mseCaptureDownload', 'manifestDownload', 'captureStreamDownload'];
 
   /**
    * Get all loaded download modules.
