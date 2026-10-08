@@ -410,57 +410,9 @@
     // Fallback: separate files
     vBlob = new Blob([fixedVideo.data], { type: 'video/mp4' });
     aBlob = new Blob([fixedAudio.data], { type: 'audio/mp4' });
-    const vMB = Math.round(vBlob.size / 1024 / 1024);
-    const aMB = Math.round(aBlob.size / 1024 / 1024);
     const elapsed = Math.round((Date.now() - startTime) / 1000);
 
-    // Helper to create save buttons
-    const makeSaveBtn = (text, blob, fn, color) => {
-      const btn = document.createElement('button');
-      btn.textContent = text;
-      btn.style.cssText = `padding:10px 20px;font-size:14px;background:${color};color:white;border:none;border-radius:6px;cursor:pointer;`;
-      btn.onclick = () => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = fn;
-        a.click();
-        btn.textContent = 'Saving...';
-        setTimeout(() => { btn.textContent = text; }, 3000);
-      };
-      return btn;
-    };
-
-    // Show save panel
-    const panel = document.createElement('div');
-    panel.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99999;padding:16px 24px;background:rgba(0,0,0,0.92);color:white;border-radius:10px;font-family:monospace;font-size:13px;min-width:500px;text-align:center;';
-
-    const cName = fileName + '.mp4';
-    const vName = fileName + '-video.mp4';
-    const aName = fileName + '-audio.mp4';
-
-    if (combinedBlob) {
-      const cMB = Math.round(combinedBlob.size / 1024 / 1024);
-      panel.innerHTML = `<div style="font-size:15px;font-weight:bold;">Done in ${elapsed}s! Video + Audio combined.</div>` +
-        `<div style="margin-top:10px;display:flex;gap:8px;justify-content:center;"></div>`;
-      const btnRow = panel.lastElementChild;
-      btnRow.appendChild(makeSaveBtn(`Save Combined MP4 (${cMB}MB)`, combinedBlob, cName, '#28a745'));
-      btnRow.appendChild(makeSaveBtn(`Video Only (${vMB}MB)`, vBlob, vName, '#6c757d'));
-      btnRow.appendChild(makeSaveBtn(`Audio Only (${aMB}MB)`, aBlob, aName, '#6c757d'));
-    } else {
-      panel.innerHTML = `<div style="font-size:15px;font-weight:bold;">Done in ${elapsed}s! ${fixedVideo.fixed} segments downloaded.</div>` +
-        `<div style="margin:6px 0;font-size:11px;color:#ffa;">Combine with: ffmpeg -i video.mp4 -i audio.mp4 -c copy combined.mp4</div>` +
-        `<div style="margin-top:10px;display:flex;gap:8px;justify-content:center;"></div>`;
-      const btnRow = panel.lastElementChild;
-      btnRow.appendChild(makeSaveBtn(`Save Video (${vMB}MB)`, vBlob, vName, '#28a745'));
-      btnRow.appendChild(makeSaveBtn(`Save Audio (${aMB}MB)`, aBlob, aName, '#007bff'));
-    }
-
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '\u00D7';
-    closeBtn.style.cssText = 'position:absolute;top:6px;right:10px;background:none;border:none;color:#aaa;font-size:18px;cursor:pointer;';
-    closeBtn.onclick = () => panel.remove();
-    panel.appendChild(closeBtn);
-    document.body.appendChild(panel);
+    showSavePanel({ fileName, combinedBlob, vBlob, aBlob, elapsed, fixed: fixedVideo.fixed });
 
     if (onProgress) onProgress({ stage: 'done', message: 'Ready! Click buttons to save.', percent: 100 });
 
@@ -473,6 +425,64 @@
       elapsed,
       fixed: fixedVideo.fixed
     };
+  };
+
+  /**
+   * Save panel shown when the download finished (kept separate from download()
+   * so it can be exercised in the UI harness).
+   */
+  const showSavePanel = ({ fileName, combinedBlob, vBlob, aBlob, elapsed, fixed }) => {
+    const vMB = Math.round(vBlob.size / 1024 / 1024);
+    const aMB = Math.round(aBlob.size / 1024 / 1024);
+    const cName = fileName + '.mp4';
+    const vName = fileName + '-video.mp4';
+    const aName = fileName + '-audio.mp4';
+
+    // Show save panel (shared panel helper from ui/tceUI.js, same stack and
+    // style as the other extension panels).
+    const ui = window.__tceUI;
+    if (ui) {
+      document.getElementById('tce-video-save-panel')?.remove();
+      const panel = ui.createPanel({ id: 'tce-video-save-panel', title: 'Video ready to save', wide: true, focus: false });
+      const makeSaveBtn = (label, blob, fn, variant) => {
+        const btn = ui.button({ label, icon: 'download', variant, className: variant === 'primary' ? 'tce-btn--grow' : '' });
+        btn.addEventListener('click', () => {
+          triggerDownload(blob, fn);
+          ui.setButtonLabel(btn, 'Saving…');
+          setTimeout(() => ui.setButtonLabel(btn, label), 3000);
+        });
+        return btn;
+      };
+      const row = ui.h('div', { class: 'tce-row' });
+      if (combinedBlob) {
+        const cMB = Math.round(combinedBlob.size / 1024 / 1024);
+        panel.body.append(ui.h('p', { text: `Downloaded in ${elapsed}s. Video and audio are combined into one MP4.` }), row);
+        row.append(makeSaveBtn(`Save MP4 (${cMB} MB)`, combinedBlob, cName, 'primary'));
+        panel.footer.append(
+          makeSaveBtn(`Video only (${vMB} MB)`, vBlob, vName, 'secondary'),
+          makeSaveBtn(`Audio only (${aMB} MB)`, aBlob, aName, 'secondary')
+        );
+      } else {
+        panel.body.append(ui.h('p', { text: `Downloaded ${fixed} segments in ${elapsed}s. Video and audio are saved as separate files.` }), row);
+        row.append(
+          makeSaveBtn(`Save video (${vMB} MB)`, vBlob, vName, 'primary'),
+          makeSaveBtn(`Save audio (${aMB} MB)`, aBlob, aName, 'secondary')
+        );
+        panel.body.append(ui.codeDisclosure(
+          'Show manual merge command',
+          `ffmpeg -i "${vName}" -i "${aName}" -c copy "${cName}"`
+        ));
+      }
+    } else {
+      // UI helpers missing: don't lose the result, save straight away.
+      console.warn('[manifestDownload] UI helpers not loaded; saving directly');
+      if (combinedBlob) {
+        triggerDownload(combinedBlob, cName);
+      } else {
+        triggerDownload(vBlob, vName);
+        triggerDownload(aBlob, aName);
+      }
+    }
   };
 
   // === Helpers ===
@@ -491,9 +501,10 @@
   };
 
   const getFileName = () => {
-    const title = document.querySelector('h1, h2, [class*="videoTitle"] label')
-      ?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '')?.trim() || 'recording';
-    return title;
+    const raw = document.querySelector('h1, h2, [class*="videoTitle"] label')?.textContent || '';
+    return window.__tceUI ? window.__tceUI.sanitizeFilename(raw, 'recording')
+      // eslint-disable-next-line no-control-regex
+      : (raw.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim() || 'recording');
   };
 
   const triggerDownload = (blob, filename) => {
@@ -517,6 +528,7 @@
     isAvailable,
     download,
     // Expose for debugging
+    showSavePanel,
     hasCryptoKey,
     findSegmentTemplates,
     getInitSegments,

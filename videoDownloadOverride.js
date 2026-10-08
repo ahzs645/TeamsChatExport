@@ -1173,7 +1173,8 @@
           // Get video title
           const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
           const title = titleEl?.innerText?.trim() || document.title?.trim() || 'video';
-          const safeTitle = title.replace(/[^a-zA-Z0-9\s-]/g, '').trim() || 'recording';
+          const safeTitle = (window.__tceUI ? window.__tceUI.sanitizeFilename(title, 'recording')
+            : (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim() || 'recording'));
 
           notify('Step 5: Triggering video download...');
           const videoUrl = URL.createObjectURL(blobs.videoBlob);
@@ -1251,7 +1252,8 @@
           // Get video title
           const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
           const title = titleEl?.innerText?.trim() || document.title?.trim() || 'video';
-          const safeTitle = title.replace(/[^a-zA-Z0-9\s-]/g, '').trim() || 'recording';
+          const safeTitle = (window.__tceUI ? window.__tceUI.sanitizeFilename(title, 'recording')
+            : (title.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim() || 'recording'));
 
           // Download combined file
           notify('Downloading combined file...');

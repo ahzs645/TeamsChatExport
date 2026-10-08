@@ -1,5 +1,6 @@
 {
   "action": {
+     "default_title": "Teams Chat Exporter",
      "default_popup": "popup.html",
      "default_icon": {
        "16": "assets/icon16.png",
@@ -12,7 +13,7 @@
   },
   "content_scripts": [ {
      "css": [ "transcriptStyles.css" ],
-     "js": [ "content.js" ],
+     "js": [ "ui/tceUI.js", "content.js" ],
      "matches": [
         "*://teams.microsoft.com/*",
         "*://*.teams.microsoft.com/*",
@@ -24,14 +25,14 @@
      "run_at": "document_start",
      "all_frames": true
   } ],
-  "description": "Export Microsoft Teams chat conversations and meeting transcripts.",
+  "description": "Export Microsoft Teams chats, meeting transcripts and recordings from Teams on the web.",
   "icons": {
      "16": "assets/icon16.png",
      "48": "assets/icon48.png",
      "128": "assets/icon128.png"
   },
   "manifest_version": 3,
-  "name": "Microsoft Teams Chat Exporter",
+  "name": "Teams Chat Exporter",
   "permissions": [ "activeTab", "storage", "webRequest" ],
   "host_permissions": [
      "*://*.sharepoint.com/*",
@@ -42,6 +43,6 @@
   "version": "6.5",
   "web_accessible_resources": [ {
      "matches": [ "<all_urls>" ],
-     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js", "videoDownload/directDownload.js", "videoDownload/manifestDownload.js", "videoDownload/mseCaptureDownload.js", "videoDownload/captureStreamDownload.js", "videoDownload/coordinator.js", "videoDownload/fmp4ToMp4.js" ]
+     "resources": [ "results.html", "style.css", "results.js", "src/modules/*", "chatFetchOverride.js", "contextBridge.js", "transcriptAPIFetcher.js", "transcriptFetchOverride.js", "videoDownloadOverride.js", "batchTranscriptDownload.js", "transcriptStyles.css", "mp4muxer.js", "videoDownload/directDownload.js", "videoDownload/manifestDownload.js", "videoDownload/mseCaptureDownload.js", "videoDownload/captureStreamDownload.js", "videoDownload/coordinator.js", "videoDownload/fmp4ToMp4.js", "ui/tceUI.js" ]
   } ]
 }
