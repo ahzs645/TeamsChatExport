@@ -1,769 +1,478 @@
-/**
- * Generates HTML export of conversations using the existing viewer interface
+/*
+ * Teams Chat Exporter — results viewer.
+ *
+ * Storage contract (chrome.storage.local):
+ *   savedExtractions      { "[<saved time>] <chat name>": Message[] }   (key format kept for older exports)
+ *   savedExtractionsMeta  { <same key>: { name, source: 'extract'|'upload', savedAt, fileName?, originalExtractedAt? } }
+ *   teamsChatData         last extraction only; read as a fallback when savedExtractions is empty
+ *   viewerSelf            { byConversation: { <chat name>: <author> }, last: <author> }
+ *
+ * The background page opens results.html?select=<key> after storing an extraction, so the
+ * viewer only ever reads conversations from storage and never adds entries of its own.
  */
-const generateHTMLExport = (conversations) => {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-  
-  // Get the current CSS from the page
-  const styleContent = `
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    height: 100vh;
-    background-color: #f4f4f9;
-}
 
-#main-content {
-    display: flex;
-    flex-grow: 1;
-}
+/**
+ * Rendering helpers shared by the viewer and the exported HTML page.
+ * This function is serialised with Function#toString into exports, so it must stay
+ * self-contained (no references to anything outside its own body).
+ */
+function createViewerCore() {
+  const HUE_COUNT = 8;
 
-#sidebar {
-    background-color: #f9f9f9;
-    width: 300px;
-    padding: 20px;
-    border-right: 1px solid #e0e0e0;
-    overflow-y: auto;
-}
+  const escapeHtml = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+  }[c]));
 
-#sidebar h2 {
-    margin-top: 0;
-    margin-bottom: 15px;
-    font-size: 20px;
-    color: #333;
-}
-
-#chat-list {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-}
-
-.chat-list-item {
-    display: flex;
-    align-items: center;
-    padding: 10px;
-    margin-bottom: 5px;
-    cursor: pointer;
-    border-radius: 5px;
-    transition: background-color 0.2s;
-}
-
-.chat-list-item:hover,
-.chat-list-item.active {
-    background-color: #e0e0e0;
-}
-
-.chat-list-item-avatar-wrapper {
-    margin-right: 10px;
-}
-
-.chat-list-item-avatar {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: bold;
-    color: white;
-}
-
-.chat-list-item-initials {
-    font-size: 14px;
-}
-
-.chat-list-item-content {
-    flex-grow: 1;
-    min-width: 0;
-}
-
-.chat-list-item-header {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 2px;
-}
-
-.chat-list-item-title {
-    font-weight: 600;
-    font-size: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.chat-list-item-timestamp {
-    font-size: 12px;
-    color: #666;
-}
-
-.chat-list-item-preview {
-    font-size: 12px;
-    color: #666;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-#chat-area {
-    flex-grow: 1;
-    display: flex;
-    flex-direction: column;
-    background-color: white;
-}
-
-#chat-header {
-    background-color: #f5f5f5;
-    padding: 15px 20px;
-    border-bottom: 1px solid #e0e0e0;
-}
-
-.header-content {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-}
-
-.avatar-container {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background-color: #8B5FBF;
-}
-
-.chat-avatar-initials {
-    color: white;
-    font-weight: bold;
-    font-size: 16px;
-}
-
-#chat-title {
-    font-size: 18px;
-    font-weight: 600;
-    color: #333;
-}
-
-#message-list {
-    flex-grow: 1;
-    padding: 20px;
-    overflow-y: auto;
-    background-color: #fafafa;
-}
-
-.message-container {
-    margin-bottom: 15px;
-}
-
-.message-container.sent {
-    text-align: right;
-}
-
-.message-divider {
-    text-align: center;
-    color: #666;
-    font-weight: 600;
-    margin: 20px 0 15px;
-}
-
-.message-container.system {
-    text-align: center;
-}
-
-.message-details {
-    font-size: 12px;
-    color: #666;
-    margin-bottom: 5px;
-}
-
-.message-bubble {
-    display: inline-block;
-    padding: 10px 15px;
-    border-radius: 15px;
-    background-color: #e0e0e0;
-    max-width: 70%;
-    text-align: left;
-}
-
-.message-bubble.sent-message {
-    background-color: #8B5FBF !important;
-    color: white !important;
-    margin-left: auto !important;
-    margin-right: 0 !important;
-}
-
-.message-container.system .message-bubble {
-    background-color: #f0f0f5;
-    color: #333;
-    margin: 0 auto;
-}
-
-.consecutive-message .message-bubble {
-    margin-top: 2px;
-}
-`;
-
-  let html = `<!DOCTYPE html>
-<html>
-<head>
-  <title>Teams Chat Export - ${timestamp}</title>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <style>
-    ${styleContent}
-    
-    /* User Selection Modal */
-    .modal-overlay {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: rgba(0,0,0,0.5);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 1000;
+  // A saved key looks like "[10/8/2026, 11:28:21 AM] Chat name". Only bracket groups that contain a
+  // digit count as our timestamp prefix, so a real chat called "[EXT] Vendor" keeps its name.
+  const PREFIX_RE = /^\[([^\]]*\d[^\]]*)\]\s*([\s\S]+)$/;
+  const parseConversationName = (fullName) => {
+    const text = String(fullName == null ? '' : fullName);
+    const match = text.match(PREFIX_RE);
+    if (match) {
+      return { cleanName: match[2], extractionTime: match[1], isTimestamped: true };
     }
-    
-    .modal {
-      background: white;
-      border-radius: 8px;
-      padding: 30px;
-      max-width: 500px;
-      width: 90%;
-      max-height: 80vh;
-      overflow-y: auto;
+    return { cleanName: text, extractionTime: null, isTimestamped: false };
+  };
+
+  // Removes every leading timestamp prefix ("[time] [time] Name" -> "Name") for re-uploaded exports.
+  const stripPrefixes = (fullName) => {
+    let current = parseConversationName(fullName);
+    let firstTime = current.extractionTime;
+    while (current.isTimestamped) {
+      const next = parseConversationName(current.cleanName);
+      if (!next.isTimestamped) break;
+      firstTime = firstTime || next.extractionTime;
+      current = next;
     }
-    
-    .modal h2 {
-      margin-top: 0;
-      margin-bottom: 20px;
-      color: #333;
+    return { cleanName: current.cleanName, extractionTime: firstTime };
+  };
+
+  const hashString = (text) => {
+    let hash = 5381;
+    const value = String(text || '');
+    for (let i = 0; i < value.length; i += 1) {
+      hash = ((hash << 5) + hash + value.charCodeAt(i)) | 0;
     }
-    
-    .user-selection-list {
-      max-height: 300px;
-      overflow-y: auto;
-      margin-bottom: 20px;
-    }
-    
-    .user-option {
-      padding: 12px 16px;
-      margin: 8px 0;
-      border: 2px solid #e0e0e0;
-      border-radius: 8px;
-      cursor: pointer;
-      transition: all 0.2s;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .user-option:hover {
-      border-color: #5B5FC5;
-      background: #f8f9ff;
-    }
-    
-    .user-option.selected {
-      border-color: #5B5FC5;
-      background: #5B5FC5;
-      color: white;
-    }
-    
-    .user-avatar {
-      width: 32px;
-      height: 32px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: bold;
-      color: white;
-      font-size: 12px;
-      flex-shrink: 0;
-    }
-    
-    .user-info {
-      flex-grow: 1;
-    }
-    
-    .user-name {
-      font-weight: 600;
-      margin-bottom: 2px;
-    }
-    
-    .user-message-count {
-      font-size: 12px;
-      opacity: 0.7;
-    }
-    
-    .modal-buttons {
-      display: flex;
-      gap: 12px;
-      justify-content: flex-end;
-    }
-    
-    .btn {
-      padding: 8px 16px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-weight: 600;
-    }
-    
-    .btn-primary {
-      background: #5B5FC5;
-      color: white;
-    }
-    
-    .btn-secondary {
-      background: #e0e0e0;
-      color: #333;
-    }
-    
-    .btn:hover {
-      opacity: 0.9;
-    }
-    
-    .header-actions {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-    }
-    
-    .change-user-btn {
-      padding: 6px 12px;
-      background: #5B5FC5;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 12px;
-    }
-    
-    .change-user-btn:hover {
-      background: #4a4d9e;
-    }
-    
-    .current-user-indicator {
-      font-size: 12px;
-      color: #666;
-      margin-left: 10px;
-    }
-  </style>
-</head>
-<body>
-  <div id="main-content">
-    <div id="sidebar">
-      <h2>Conversations</h2>
-      <ul id="chat-list"></ul>
-    </div>
-    <div id="chat-area">
-      <div id="chat-header">
-        <div class="header-content">
-          <div class="avatar-container">
-            <span class="chat-avatar-initials"></span>
-          </div>
-          <div class="title-container">
-            <span id="chat-title">Select a conversation</span>
-          </div>
-          <div class="header-actions">
-            <button class="change-user-btn" onclick="showUserSelection()">Change User</button>
-            <span class="current-user-indicator" id="current-user-display">No user selected</span>
-          </div>
-        </div>
-      </div>
-      <div id="message-list"></div>
-    </div>
-  </div>
-  
-  <!-- User Selection Modal -->
-  <div id="user-selection-modal" class="modal-overlay" style="display: none;">
-    <div class="modal">
-      <h2>Who are you in this conversation?</h2>
-      <p style="color: #666; margin-bottom: 20px;">Select your name to properly align sent/received messages:</p>
-      <div class="user-selection-list" id="user-list"></div>
-      <div class="modal-buttons">
-        <button class="btn btn-secondary" onclick="closeUserSelection()">Cancel</button>
-        <button class="btn btn-primary" onclick="confirmUserSelection()" id="confirm-btn" disabled>Confirm</button>
-      </div>
-    </div>
-  </div>
-  
-  <script>
-    // Embed the conversation data
-    const allConversations = ${JSON.stringify(conversations)};
-    let currentConversationName = null;
-    let currentUser = null;
-    let selectedUserOption = null;
-    
-    // Function to generate initials and random background color
-    const generateAvatar = (name) => {
-      const words = name.split(' ').filter(word => word.length > 0);
-      let initials = '';
-      if (words.length >= 2) {
-        initials = words[0][0] + words[1][0];
-      } else if (words.length === 1) {
-        initials = words[0][0];
+    return Math.abs(hash);
+  };
+
+  const hueFor = (name) => hashString(name) % HUE_COUNT;
+
+  const initialsFor = (name) => {
+    const words = String(name || '')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+    if (words.length === 0) return '?';
+    return words.slice(0, 2).map((word) => Array.from(word)[0]).join('').toUpperCase();
+  };
+
+  const pluralize = (count, singular, plural) => `${count} ${count === 1 ? singular : (plural || `${singular}s`)}`;
+
+  const isRealMessage = (msg) => msg && msg.type !== 'divider' && msg.type !== 'system';
+
+  const messageText = (msg) => String((msg && (msg.message || msg.content)) || '').trim();
+
+  const getParticipants = (messages) => {
+    const counts = new Map();
+    (messages || []).forEach((msg) => {
+      if (isRealMessage(msg) && msg.author && msg.author !== 'Unknown') {
+        counts.set(msg.author, (counts.get(msg.author) || 0) + 1);
       }
-      
-      const pastelColors = [
-        '#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', 
-        '#E0BBE4', '#957DAD', '#D291BC', '#FFC72C', '#DA2C38'
-      ];
-      const randomColor = pastelColors[Math.floor(Math.random() * pastelColors.length)];
-      
-      return { initials: initials.toUpperCase(), backgroundColor: randomColor };
-    };
-    
-    // Function to render messages
-    const renderMessages = (conversationName) => {
-      currentConversationName = conversationName;
-      
-      const chatTitle = document.getElementById('chat-title');
-      const messageList = document.getElementById('message-list');
-      const avatarContainer = document.querySelector('.avatar-container');
-      const avatarInitials = document.querySelector('.chat-avatar-initials');
-      
-      const avatarData = generateAvatar(conversationName);
-      chatTitle.textContent = conversationName;
-      avatarInitials.textContent = avatarData.initials;
-      avatarContainer.style.backgroundColor = avatarData.backgroundColor;
-      
-      messageList.innerHTML = '';
-      const messages = allConversations[conversationName];
-      
-      if (!messages || messages.length === 0) {
-        messageList.innerHTML = '<p style="text-align: center; color: #666;">No messages in this conversation.</p>';
+    });
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name, count]) => ({ name, count }));
+  };
+
+  const countMessages = (messages) => (messages || []).filter(isRealMessage).length;
+
+  // Only let through link/image URLs that cannot run script.
+  const safeUrl = (url, { image = false } = {}) => {
+    if (!url) return null;
+    try {
+      const parsed = new URL(String(url), document.baseURI);
+      const allowed = image ? ['http:', 'https:', 'data:', 'blob:'] : ['http:', 'https:', 'mailto:'];
+      if (!allowed.includes(parsed.protocol)) return null;
+      if (parsed.protocol === 'data:' && !/^data:image\//i.test(String(url))) return null;
+      return parsed.href;
+    } catch (_err) {
+      return null;
+    }
+  };
+
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text != null) node.textContent = text;
+    return node;
+  };
+
+  const fillAvatar = (node, name) => {
+    node.textContent = initialsFor(name);
+    node.dataset.hue = String(hueFor(name));
+  };
+
+  // Appends text to parent, wrapping case-insensitive matches of term in <mark>.
+  const appendHighlighted = (parent, text, term) => {
+    const value = String(text || '');
+    if (!term) {
+      parent.appendChild(document.createTextNode(value));
+      return;
+    }
+    const lower = value.toLowerCase();
+    const needle = term.toLowerCase();
+    let index = 0;
+    let hit = lower.indexOf(needle, index);
+    while (hit !== -1) {
+      if (hit > index) parent.appendChild(document.createTextNode(value.slice(index, hit)));
+      parent.appendChild(el('mark', null, value.slice(hit, hit + needle.length)));
+      index = hit + needle.length;
+      hit = lower.indexOf(needle, index);
+    }
+    if (index < value.length) parent.appendChild(document.createTextNode(value.slice(index)));
+  };
+
+  // Full-size preview in an in-page dialog. Opening images in a new tab is avoided on purpose:
+  // browsers block data: navigations, and a blob: copy of an SVG would run its scripts in our origin.
+  const openImage = (src, alt) => {
+    let dialog = document.getElementById('image-lightbox');
+    if (!dialog) {
+      dialog = el('dialog', 'lightbox');
+      dialog.id = 'image-lightbox';
+      dialog.setAttribute('aria-label', 'Image preview');
+      const close = el('button', 'btn lightbox-close', 'Close');
+      close.type = 'button';
+      close.addEventListener('click', () => dialog.close());
+      dialog.append(close, el('img', 'lightbox-img'));
+      dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+      document.body.appendChild(dialog);
+    }
+    const img = dialog.querySelector('img');
+    img.src = src;
+    img.alt = alt || '';
+    dialog.showModal();
+  };
+
+  const buildAttachments = (attachments, term) => {
+    const list = el('ul', 'message-attachments');
+    list.setAttribute('aria-label', 'Attachments');
+    attachments.forEach((att) => {
+      if (!att) return;
+      const item = el('li', 'attachment-item');
+      const label = att.label || att.name || att.text || att.title || 'Attachment';
+      const href = safeUrl(att.href || att.url);
+      const icon = el('span', 'attachment-icon');
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = '📎';
+      item.appendChild(icon);
+      if (href) {
+        const link = el('a');
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        appendHighlighted(link, label, term);
+        item.appendChild(link);
+      } else {
+        const span = el('span', 'attachment-name');
+        appendHighlighted(span, label, term);
+        item.appendChild(span);
+      }
+      const extra = [att.type && String(att.type).length <= 24 ? att.type : null, att.size].filter(Boolean).join(' · ');
+      if (extra) item.appendChild(el('span', 'attachment-meta', extra));
+      list.appendChild(item);
+    });
+    return list;
+  };
+
+  const buildImages = (images) => {
+    const wrap = el('div', 'message-images');
+    images.forEach((img, index) => {
+      if (!img || img.isEmoji) return;
+      const src = safeUrl(img.src, { image: true });
+      if (!src) return;
+      const label = img.alt || img.title || `Image ${index + 1}`;
+      const figure = el('div', 'message-image');
+      const open = el('button', 'message-image-open');
+      open.type = 'button';
+      open.setAttribute('aria-label', `Open ${label} full size`);
+      const imgEl = el('img');
+      imgEl.src = src;
+      imgEl.alt = label;
+      imgEl.loading = 'lazy';
+      open.appendChild(imgEl);
+      open.addEventListener('click', () => openImage(src, label));
+      const download = el('a', 'message-image-download', 'Download');
+      download.href = src;
+      download.download = img.alt || 'image';
+      download.target = '_blank';
+      download.rel = 'noopener noreferrer';
+      download.setAttribute('aria-label', `Download ${label}`);
+      figure.append(open, download);
+      wrap.appendChild(figure);
+    });
+    return wrap.children.length ? wrap : null;
+  };
+
+  const buildReactions = (reactions) => {
+    const wrap = el('ul', 'message-reactions');
+    wrap.setAttribute('aria-label', 'Reactions');
+    reactions.forEach((r) => {
+      if (!r) return;
+      const count = Number(r.count) || 1;
+      const chip = el('li', 'reaction-chip', `${r.emoji || ''} ${count}`);
+      const users = Array.isArray(r.users) ? r.users.join(', ') : '';
+      chip.title = users;
+      chip.setAttribute('aria-label', `${r.emoji || ''} ${pluralize(count, 'reaction')}${users ? `: ${users}` : ''}`);
+      wrap.appendChild(chip);
+    });
+    return wrap;
+  };
+
+  const matchesSearch = (msg, term) => {
+    const needle = term.toLowerCase();
+    if (String(msg.author || '').toLowerCase().includes(needle)) return true;
+    if (messageText(msg).toLowerCase().includes(needle)) return true;
+    return Array.isArray(msg.attachments) && msg.attachments.some((att) =>
+      att && String(att.label || att.name || att.text || '').toLowerCase().includes(needle));
+  };
+
+  /**
+   * Renders a conversation into container.
+   * options: { currentUser, searchTerm, authorIndex: Map(author -> palette index) }
+   * Returns { matches } (number of messages matching searchTerm, or total when not searching).
+   */
+  const renderMessages = (container, messages, options = {}) => {
+    const { currentUser = null, authorIndex = new Map() } = options;
+    const term = String(options.searchTerm || '').trim();
+    container.replaceChildren();
+
+    const all = Array.isArray(messages) ? messages.filter((m) => m && typeof m === 'object') : [];
+    if (countMessages(all) === 0 && all.length === 0) {
+      container.appendChild(el('p', 'message-list-note', 'No messages in this conversation.'));
+      return { matches: 0 };
+    }
+
+    const visible = term ? all.filter((msg) => isRealMessage(msg) && matchesSearch(msg, term)) : all;
+    if (term && visible.length === 0) {
+      container.appendChild(el('p', 'message-list-note', `No messages match “${term}” in this chat.`));
+      return { matches: 0 };
+    }
+
+    const TIME_THRESHOLD_MS = 3 * 60 * 1000;
+    let lastAuthor = null;
+    let lastTimestamp = null;
+    const fragment = document.createDocumentFragment();
+
+    visible.forEach((msg) => {
+      if (msg.type === 'divider') {
+        fragment.appendChild(el('div', 'message-divider', messageText(msg)));
+        lastAuthor = null;
+        lastTimestamp = null;
         return;
       }
-      
-      let lastAuthor = null;
-      let lastTimestamp = null;
-      const TIME_THRESHOLD_MS = 3 * 60 * 1000;
-      
-      messages.forEach(msg => {
-        if (msg.type === 'divider') {
-          const dividerEl = document.createElement('div');
-          dividerEl.classList.add('message-divider');
-          dividerEl.textContent = msg.message;
-          messageList.appendChild(dividerEl);
-          lastAuthor = null;
-          lastTimestamp = null;
-          return;
-        }
 
-        const messageContainer = document.createElement('div');
-        messageContainer.classList.add('message-container');
+      const attachments = Array.isArray(msg.attachments) ? msg.attachments.filter(Boolean) : [];
+      const images = Array.isArray(msg.embeddedImages) ? msg.embeddedImages.filter((i) => i && !i.isEmoji) : [];
+      const body = messageText(msg);
+      if (!body && attachments.length === 0 && images.length === 0) return;
 
-        const timestampDate = msg.isoTimestamp ? new Date(msg.isoTimestamp) : (msg.timestamp ? new Date(msg.timestamp) : null);
-        const timestampMillis = timestampDate && !Number.isNaN(timestampDate.getTime())
-          ? timestampDate.getTime()
-          : null;
+      const date = msg.isoTimestamp ? new Date(msg.isoTimestamp) : (msg.timestamp ? new Date(msg.timestamp) : null);
+      const millis = date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
+      const isSystem = msg.type === 'system';
+      const isSent = !isSystem && !!currentUser && msg.author === currentUser;
 
-        const authorLabel = msg.author || 'Unknown';
-        const messageType = msg.type || null;
-        const isSystemMessage = messageType === 'system';
+      const row = el('div', `message-container ${isSystem ? 'system' : (isSent ? 'sent' : 'received')}`);
 
-        if (!isSystemMessage) {
-          if (
-            msg.author !== lastAuthor ||
-            (lastTimestamp !== null && timestampMillis !== null && (timestampMillis - lastTimestamp) > TIME_THRESHOLD_MS)
-          ) {
-            const messageDetails = document.createElement('div');
-            messageDetails.classList.add('message-details');
-            let detailsText = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
-            if (msg.edited) {
-              detailsText += ' (edited)';
-            }
-            messageDetails.textContent = detailsText;
-            messageContainer.appendChild(messageDetails);
-          } else {
-            messageContainer.classList.add('consecutive-message');
+      if (!isSystem) {
+        const startsGroup = msg.author !== lastAuthor ||
+          (lastTimestamp !== null && millis !== null && (millis - lastTimestamp) > TIME_THRESHOLD_MS);
+        if (startsGroup || term) {
+          const details = el('div', 'message-details');
+          const author = el('span', 'message-author');
+          appendHighlighted(author, msg.author || 'Unknown', term);
+          details.appendChild(author);
+          if (msg.timestamp) {
+            const time = el('time', 'message-time', msg.timestamp);
+            if (msg.isoTimestamp) time.dateTime = msg.isoTimestamp;
+            details.appendChild(time);
           }
-        }
-
-        const messageBubble = document.createElement('div');
-        messageBubble.classList.add('message-bubble');
-
-        const isFromCurrentUser = currentUser && msg.author === currentUser;
-        const bubbleType = messageType || (isFromCurrentUser ? 'sent' : 'received');
-        const isSent = bubbleType === 'sent';
-
-        messageContainer.classList.add(bubbleType);
-
-        if (isSystemMessage) {
-          messageContainer.style.textAlign = 'center';
-        } else if (isSent) {
-          messageBubble.classList.add('sent-message');
-          messageContainer.style.textAlign = 'right';
-        }
-
-        // Add reply preview if present
-        if (msg.replyTo && msg.replyTo.text) {
-          const replyDiv = document.createElement('div');
-          replyDiv.className = 'reply-preview';
-          replyDiv.style.cssText = 'background: rgba(0,0,0,0.05); border-left: 3px solid #999; padding: 6px 10px; margin-bottom: 8px; border-radius: 4px; font-size: 13px;';
-          const replyAuthor = document.createElement('div');
-          replyAuthor.style.cssText = 'font-weight: 600; font-size: 11px; color: #666; margin-bottom: 2px;';
-          replyAuthor.textContent = msg.replyTo.author || 'Unknown';
-          const replyText = document.createElement('div');
-          replyText.style.cssText = 'color: #333;';
-          const truncatedText = msg.replyTo.text.length > 100 ? msg.replyTo.text.substring(0, 100) + '...' : msg.replyTo.text;
-          replyText.textContent = truncatedText;
-          replyDiv.appendChild(replyAuthor);
-          replyDiv.appendChild(replyText);
-          messageBubble.appendChild(replyDiv);
-        }
-
-        const messageText = document.createElement('div');
-        const messageBody = (msg.message || msg.content || '').trim();
-        if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
-          return;
-        }
-        messageText.textContent = messageBody;
-
-        messageBubble.appendChild(messageText);
-
-        // Add embedded images if present
-        if (msg.embeddedImages && msg.embeddedImages.length > 0) {
-          const imagesDiv = document.createElement('div');
-          imagesDiv.style.cssText = 'margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;';
-          msg.embeddedImages.forEach(img => {
-            if (img.isEmoji) return;
-            const imgEl = document.createElement('img');
-            imgEl.src = img.src;
-            imgEl.alt = img.alt || 'Image';
-            imgEl.style.cssText = 'max-width: 300px; max-height: 200px; border-radius: 8px; cursor: pointer;';
-            imgEl.onclick = () => window.open(img.src, '_blank');
-            imagesDiv.appendChild(imgEl);
-          });
-          if (imagesDiv.children.length > 0) {
-            messageBubble.appendChild(imagesDiv);
-          }
-        }
-
-        // Add reactions display if present
-        if (msg.reactions && msg.reactions.length > 0) {
-          const reactionsDiv = document.createElement('div');
-          reactionsDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;';
-          msg.reactions.forEach(r => {
-            const chip = document.createElement('span');
-            chip.style.cssText = 'background: rgba(0,0,0,0.08); padding: 2px 8px; border-radius: 12px; font-size: 12px;';
-            chip.textContent = (r.emoji || '') + ' ' + (r.count || 1);
-            chip.title = r.users ? r.users.join(', ') : '';
-            reactionsDiv.appendChild(chip);
-          });
-          messageBubble.appendChild(reactionsDiv);
-        }
-
-        messageContainer.appendChild(messageBubble);
-        messageList.appendChild(messageContainer);
-
-        if (isSystemMessage) {
-          lastAuthor = null;
-          if (timestampMillis !== null) {
-            lastTimestamp = timestampMillis;
-          }
+          if (msg.edited) details.appendChild(el('span', 'message-edited', 'Edited'));
+          row.appendChild(details);
         } else {
-          lastAuthor = msg.author;
-          if (timestampMillis !== null) {
-            lastTimestamp = timestampMillis;
-          }
+          row.classList.add('consecutive-message');
         }
-      });
+      }
 
-      messageList.scrollTop = messageList.scrollHeight;
-    };
-    
-    // Function to render chat list
-    const renderChatList = () => {
-      const chatList = document.getElementById('chat-list');
-      chatList.innerHTML = '';
-      
-      for (const name in allConversations) {
-        const listItem = document.createElement('li');
-        listItem.classList.add('chat-list-item');
-        
-        const avatarData = generateAvatar(name);
-        const messages = allConversations[name] || [];
-        const latestMessage = [...messages].reverse().find(msg => msg.type !== 'divider' && msg.type !== 'system');
-        const previewAuthor = latestMessage?.author || '';
-        const previewBody = latestMessage?.message || latestMessage?.content || '';
-        const previewText = latestMessage
-          ? (previewAuthor ? previewAuthor + ': ' : '') + previewBody
-          : 'No messages';
-        const timestampText = latestMessage && latestMessage.timestamp ? latestMessage.timestamp : '';
-        
-        listItem.innerHTML = \`
-          <div class="chat-list-item-avatar-wrapper">
-            <div class="chat-list-item-avatar" style="background-color: \${avatarData.backgroundColor};">
-              <span class="chat-list-item-initials">\${avatarData.initials}</span>
-            </div>
-          </div>
-          <div class="chat-list-item-content">
-            <div class="chat-list-item-header">
-              <span class="chat-list-item-title">\${name}</span>
-              <span class="chat-list-item-timestamp">\${timestampText}</span>
-            </div>
-            <div class="chat-list-item-preview">\${previewText}</div>
-          </div>
-        \`;
-        
-        listItem.addEventListener('click', () => {
-          document.querySelectorAll('.chat-list-item').forEach(item => {
-            item.classList.remove('active');
-          });
-          listItem.classList.add('active');
-          renderMessages(name);
-        });
-        
-        chatList.appendChild(listItem);
+      const bubble = el('div', 'message-bubble');
+      if (isSent) bubble.classList.add('sent-message');
+      const index = authorIndex.get(msg.author);
+      if (!isSystem && !isSent && index !== undefined) {
+        bubble.dataset.authorIndex = String(index % HUE_COUNT);
       }
-      
-      // Auto-select first conversation
-      if (Object.keys(allConversations).length > 0) {
-        const firstName = Object.keys(allConversations)[0];
-        renderMessages(firstName);
-        chatList.firstChild.classList.add('active');
-      }
-    };
-    
-    // User Selection Functions
-    const getAllUsers = () => {
-      const users = new Set();
-      Object.values(allConversations).forEach(messages => {
-        messages.forEach(msg => {
-          if (msg.author && msg.author.trim()) {
-            users.add(msg.author);
-          }
-        });
-      });
-      return Array.from(users).sort();
-    };
-    
-    const getUserMessageCount = (userName) => {
-      let count = 0;
-      Object.values(allConversations).forEach(messages => {
-        messages.forEach(msg => {
-          if (msg.author === userName) count++;
-        });
-      });
-      return count;
-    };
-    
-    const showUserSelection = () => {
-      const modal = document.getElementById('user-selection-modal');
-      const userList = document.getElementById('user-list');
-      const users = getAllUsers();
-      
-      userList.innerHTML = '';
-      
-      users.forEach(userName => {
-        const messageCount = getUserMessageCount(userName);
-        const avatarData = generateAvatar(userName);
-        
-        const userOption = document.createElement('div');
-        userOption.className = 'user-option';
-        userOption.dataset.userName = userName;
-        
-        if (currentUser === userName) {
-          userOption.classList.add('selected');
-          selectedUserOption = userOption;
-        }
-        
-        userOption.innerHTML = \`
-          <div class="user-avatar" style="background-color: \${avatarData.backgroundColor};">
-            \${avatarData.initials}
-          </div>
-          <div class="user-info">
-            <div class="user-name">\${userName}</div>
-            <div class="user-message-count">\${messageCount} messages</div>
-          </div>
-        \`;
-        
-        userOption.addEventListener('click', () => {
-          if (selectedUserOption) {
-            selectedUserOption.classList.remove('selected');
-          }
-          userOption.classList.add('selected');
-          selectedUserOption = userOption;
-          document.getElementById('confirm-btn').disabled = false;
-        });
-        
-        userList.appendChild(userOption);
-      });
-      
-      modal.style.display = 'flex';
-      document.getElementById('confirm-btn').disabled = !selectedUserOption;
-    };
-    
-    const closeUserSelection = () => {
-      document.getElementById('user-selection-modal').style.display = 'none';
-      selectedUserOption = null;
-    };
-    
-    const confirmUserSelection = () => {
-      if (selectedUserOption) {
-        currentUser = selectedUserOption.dataset.userName;
-        document.getElementById('current-user-display').textContent = 'You: ' + currentUser;
-        
-        // Re-render current conversation to update message alignment
-        if (currentConversationName) {
-          renderMessages(currentConversationName);
-        }
-      }
-      closeUserSelection();
-    };
-    
-    // Initialize
-    renderChatList();
-    
-    // Show user selection on first load
-    setTimeout(() => {
-      if (!currentUser) {
-        showUserSelection();
-      }
-    }, 1000);
-  </script>
-</body>
-</html>`;
-  
-  return html;
-};
 
-/**
- * Escapes HTML special characters to prevent XSS
- */
-const escapeHtml = (text) => {
-  if (!text) return '';
-  const map = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#039;'
+      if (msg.replyTo && msg.replyTo.text) {
+        const reply = el('blockquote', 'reply-preview');
+        reply.appendChild(el('div', 'reply-author', msg.replyTo.author || 'Unknown'));
+        const replyText = String(msg.replyTo.text);
+        reply.appendChild(el('div', 'reply-text', replyText.length > 100 ? `${replyText.slice(0, 100)}…` : replyText));
+        bubble.appendChild(reply);
+      }
+
+      if (body) {
+        const text = el('div', 'message-text');
+        appendHighlighted(text, body, term);
+        bubble.appendChild(text);
+      }
+      if (attachments.length) bubble.appendChild(buildAttachments(attachments, term));
+      if (images.length) {
+        const imagesEl = buildImages(images);
+        if (imagesEl) bubble.appendChild(imagesEl);
+      }
+      if (Array.isArray(msg.reactions) && msg.reactions.length) bubble.appendChild(buildReactions(msg.reactions));
+
+      row.appendChild(bubble);
+      fragment.appendChild(row);
+
+      lastAuthor = isSystem ? null : msg.author;
+      if (millis !== null) lastTimestamp = millis;
+    });
+
+    container.appendChild(fragment);
+    return { matches: term ? visible.length : countMessages(all) };
   };
-  return text.replace(/[&<>"']/g, m => map[m]);
+
+  const renderParticipants = (list, participants, { currentUser = null, authorIndex = new Map() } = {}) => {
+    list.replaceChildren();
+    participants.forEach((p) => {
+      const chip = el('li', 'participant-chip');
+      const index = authorIndex.get(p.name);
+      if (index !== undefined) chip.dataset.authorIndex = String(index % HUE_COUNT);
+      if (currentUser === p.name) chip.classList.add('is-you');
+      const avatar = el('span', 'avatar avatar-xs');
+      avatar.setAttribute('aria-hidden', 'true');
+      avatar.textContent = initialsFor(p.name);
+      if (index !== undefined) avatar.dataset.hue = String(index % HUE_COUNT);
+      const name = el('span', 'participant-name', p.name);
+      const count = el('span', 'participant-count', String(p.count));
+      count.setAttribute('aria-label', pluralize(p.count, 'message'));
+      chip.append(avatar, name, count);
+      if (currentUser === p.name) chip.appendChild(el('span', 'participant-you', '(you)'));
+      list.appendChild(chip);
+    });
+  };
+
+  const buildAuthorIndex = (participants) => new Map(participants.map((p, i) => [p.name, i]));
+
+  /** Builds a sidebar entry; returns { item, button }. */
+  const buildChatListItem = ({ key, title, subtitle, subtitleTitle }) => {
+    const item = el('li', 'chat-list-item');
+    const button = el('button', 'chat-list-item-main');
+    button.type = 'button';
+    button.title = title;
+    button.dataset.key = key;
+    const avatar = el('span', 'avatar avatar-sm');
+    avatar.setAttribute('aria-hidden', 'true');
+    fillAvatar(avatar, title);
+    const content = el('span', 'chat-list-item-content');
+    content.appendChild(el('span', 'chat-list-item-title', title));
+    if (subtitle) {
+      const sub = el('span', 'chat-list-item-subtitle', subtitle);
+      if (subtitleTitle) sub.title = subtitleTitle;
+      content.appendChild(sub);
+    }
+    button.append(avatar, content);
+    item.appendChild(button);
+    return { item, button };
+  };
+
+  return {
+    HUE_COUNT,
+    escapeHtml,
+    parseConversationName,
+    stripPrefixes,
+    hashString,
+    hueFor,
+    initialsFor,
+    pluralize,
+    isRealMessage,
+    getParticipants,
+    countMessages,
+    safeUrl,
+    fillAvatar,
+    renderMessages,
+    renderParticipants,
+    buildAuthorIndex,
+    buildChatListItem
+  };
+}
+
+const Core = createViewerCore();
+const { escapeHtml, parseConversationName, pluralize } = Core;
+
+const STORAGE_KEYS = {
+  data: 'savedExtractions',
+  meta: 'savedExtractionsMeta',
+  legacy: 'teamsChatData',
+  self: 'viewerSelf'
 };
 
+/** Human-readable info about a stored conversation key. */
+// "10/8/2026, 11:28:21 AM" -> "10/8/2026, 11:28 AM" for compact sidebar/header labels.
+const shortTime = (text) => String(text || '').replace(/(\d{1,2}:\d{2}):\d{2}/, '$1');
+
+const describeConversation = (key, meta) => {
+  const info = meta && meta[key] ? meta[key] : {};
+  const parsed = parseConversationName(key);
+  const title = info.name || parsed.cleanName;
+  let subtitle = '';
+  let subtitleTitle = '';
+  if (info.source === 'upload') {
+    const from = info.fileName ? `from ${info.fileName}` : 'from file';
+    const when = info.originalExtractedAt ? ` · extracted ${shortTime(info.originalExtractedAt)}` : '';
+    subtitle = `Imported ${from}${when}`;
+    subtitleTitle = `Imported ${parsed.extractionTime || ''} ${from}${when}`.replace(/\s+/g, ' ').trim();
+  } else if (parsed.extractionTime) {
+    subtitle = `Extracted ${shortTime(parsed.extractionTime)}`;
+    subtitleTitle = `Extracted ${parsed.extractionTime}`;
+  }
+  return { title, subtitle, subtitleTitle: subtitleTitle || subtitle, savedAt: info.savedAt || null };
+};
+
+const timestampSlug = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+
 /**
- * Generates CSV export of conversations
+ * Generates the JSON export: { meta, conversations }. The upload handler accepts this shape and
+ * the plain { name: messages } shape.
  */
+const generateEnhancedJSONExport = (conversations, metaMap = {}) => {
+  const conversationInfo = {};
+  Object.keys(conversations).forEach((key) => {
+    const { title } = describeConversation(key, metaMap);
+    conversationInfo[key] = { ...(metaMap[key] || {}), name: title };
+  });
+  return JSON.stringify({
+    meta: {
+      exportedAt: new Date().toISOString(),
+      exporter: 'Teams Chat Exporter',
+      version: '2',
+      conversationCount: Object.keys(conversations).length,
+      messageCount: Object.values(conversations).reduce((n, msgs) => n + Core.countMessages(msgs), 0),
+      conversationInfo
+    },
+    conversations
+  }, null, 2);
+};
+
+/** Generates CSV export of conversations (one row per message). */
 const generateCSVExport = (conversations) => {
   const headers = ['conversation', 'id', 'author', 'timestamp', 'text', 'edited', 'reactions_json', 'attachments_json', 'images_json', 'reply_to_json'];
   const rows = [headers.join(',')];
 
   Object.entries(conversations).forEach(([name, messages]) => {
-    messages.forEach(msg => {
-      // Skip dividers and system messages for CSV
+    messages.forEach((msg) => {
       if (msg.type === 'divider' || msg.type === 'system') return;
-
       const row = [
         name,
         msg.id || '',
@@ -775,8 +484,7 @@ const generateCSVExport = (conversations) => {
         JSON.stringify(msg.attachments || []),
         JSON.stringify(msg.embeddedImages || []),
         JSON.stringify(msg.replyTo || null)
-      ].map(field => `"${String(field).replace(/"/g, '""')}"`);
-
+      ].map((field) => `"${String(field).replace(/"/g, '""')}"`);
       rows.push(row.join(','));
     });
   });
@@ -784,26 +492,25 @@ const generateCSVExport = (conversations) => {
   return rows.join('\n');
 };
 
-/**
- * Generates TXT export of conversations
- */
+/** Generates TXT export of conversations. */
 const generateTXTExport = (conversations) => {
   const lines = [];
 
   Object.entries(conversations).forEach(([name, messages]) => {
-    lines.push(`${'='.repeat(50)}`);
-    lines.push(`${name}`);
-    lines.push(`${'='.repeat(50)}`);
+    const { cleanName, extractionTime } = parseConversationName(name);
+    lines.push('='.repeat(50));
+    lines.push(cleanName);
+    if (extractionTime) lines.push(`Extracted ${extractionTime}`);
+    lines.push('='.repeat(50));
     lines.push('');
 
-    messages.forEach(msg => {
+    messages.forEach((msg) => {
       if (msg.type === 'divider') {
         lines.push('');
         lines.push(`--- ${msg.message || msg.content || ''} ---`);
         lines.push('');
         return;
       }
-
       if (msg.type === 'system') {
         lines.push(`[SYSTEM] ${msg.message || msg.content || ''}`);
         return;
@@ -817,26 +524,28 @@ const generateTXTExport = (conversations) => {
       lines.push(`[${ts}] ${author}${editedMarker}:`);
       lines.push(text);
 
-      // Add images if present
+      if (Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+        msg.attachments.forEach((att) => {
+          if (!att) return;
+          const label = att.label || att.name || att.text || 'Attachment';
+          lines.push(`  Attachment: ${label}${att.href ? ` <${att.href}>` : ''}`);
+        });
+      }
+
       if (msg.embeddedImages && msg.embeddedImages.length > 0) {
-        const nonEmoji = msg.embeddedImages.filter(img => !img.isEmoji);
+        const nonEmoji = msg.embeddedImages.filter((img) => !img.isEmoji);
         if (nonEmoji.length > 0) {
-          lines.push(`  Images: ${nonEmoji.length} image(s)`);
-          nonEmoji.forEach(img => {
-            lines.push(`    - ${img.src}`);
-          });
+          lines.push(`  Images: ${pluralize(nonEmoji.length, 'image')}`);
+          nonEmoji.forEach((img) => lines.push(`    - ${img.src}`));
         }
       }
 
-      // Add reactions if present
       if (msg.reactions && msg.reactions.length > 0) {
-        const reactionStr = msg.reactions.map(r => `${r.emoji} ${r.count}`).join(' ');
-        lines.push(`  Reactions: ${reactionStr}`);
+        lines.push(`  Reactions: ${msg.reactions.map((r) => `${r.emoji} ${r.count}`).join(' ')}`);
       }
 
-      // Add reply context if present
       if (msg.replyTo) {
-        const replyText = msg.replyTo.text?.substring(0, 50) || '';
+        const replyText = (msg.replyTo.text || '').substring(0, 50);
         lines.push(`  -> Replying to ${msg.replyTo.author}: "${replyText}..."`);
       }
 
@@ -851,25 +560,206 @@ const generateTXTExport = (conversations) => {
 };
 
 /**
- * Generates enhanced JSON export with metadata
+ * Script for the exported HTML page. Serialised with Function#toString, so self-contained:
+ * it receives the shared core, the conversations, and display info as arguments.
  */
-const generateEnhancedJSONExport = (conversations) => {
-  const messageCount = Object.values(conversations).flat().length;
+function runExportedPage(Core, conversations, info) {
+  const chatList = document.getElementById('chat-list');
+  const messageList = document.getElementById('message-list');
+  const title = document.getElementById('chat-title');
+  const metaLine = document.getElementById('chat-meta');
+  const avatar = document.getElementById('chat-avatar');
+  const userSelect = document.getElementById('current-user-select');
+  const participantsList = document.getElementById('participants-list');
+  const STORE_KEY = 'teams-chat-export-viewing-as';
 
-  return JSON.stringify({
-    meta: {
-      exportedAt: new Date().toISOString(),
-      conversationCount: Object.keys(conversations).length,
-      messageCount: messageCount,
-      version: '1.2'
-    },
-    conversations
-  }, null, 2);
+  let viewingAs = {};
+  try { viewingAs = JSON.parse(localStorage.getItem(STORE_KEY) || '{}') || {}; } catch (_e) { viewingAs = {}; }
+  const saveViewingAs = () => { try { localStorage.setItem(STORE_KEY, JSON.stringify(viewingAs)); } catch (_e) { /* file:// may block storage */ } };
+
+  let currentKey = null;
+
+  const show = (key) => {
+    currentKey = key;
+    const entry = info.entries[key];
+    const messages = conversations[key] || [];
+    const participants = Core.getParticipants(messages);
+    const authorIndex = Core.buildAuthorIndex(participants);
+    const names = participants.map((p) => p.name);
+    let me = viewingAs[entry.title];
+    if (!names.includes(me)) me = names.includes(viewingAs.__last) ? viewingAs.__last : null;
+
+    title.textContent = entry.title;
+    title.title = entry.title;
+    Core.fillAvatar(avatar, entry.title);
+    metaLine.textContent = [Core.pluralize(Core.countMessages(messages), 'message'), entry.subtitle].filter(Boolean).join(' · ');
+
+    userSelect.replaceChildren(new Option('Nobody (read only)', ''));
+    names.forEach((n) => userSelect.appendChild(new Option(n, n, false, n === me)));
+    userSelect.value = me || '';
+
+    Core.renderParticipants(participantsList, participants, { currentUser: me, authorIndex });
+    Core.renderMessages(messageList, messages, { currentUser: me, authorIndex });
+    messageList.scrollTop = messageList.scrollHeight;
+
+    chatList.querySelectorAll('.chat-list-item-main').forEach((b) => {
+      const active = b.dataset.key === key;
+      b.closest('.chat-list-item').classList.toggle('active', active);
+      if (active) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+    });
+  };
+
+  userSelect.addEventListener('change', () => {
+    const entry = info.entries[currentKey];
+    if (userSelect.value) {
+      viewingAs[entry.title] = userSelect.value;
+      viewingAs.__last = userSelect.value;
+    } else {
+      delete viewingAs[entry.title];
+    }
+    saveViewingAs();
+    show(currentKey);
+  });
+
+  info.order.forEach((key) => {
+    const entry = info.entries[key];
+    const { item, button } = Core.buildChatListItem({
+      key,
+      title: entry.title,
+      subtitle: entry.listSubtitle,
+      subtitleTitle: entry.subtitle
+    });
+    button.addEventListener('click', () => show(key));
+    chatList.appendChild(item);
+  });
+
+  chatList.addEventListener('keydown', (event) => {
+    const buttons = Array.from(chatList.querySelectorAll('.chat-list-item-main'));
+    const index = buttons.indexOf(document.activeElement);
+    if (index === -1) return;
+    const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: buttons.length - 1 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault();
+    const target = buttons[Math.max(0, Math.min(buttons.length - 1, next))];
+    if (target) target.focus();
+  });
+
+  if (info.order.length) show(info.order[0]);
+}
+
+/** Collects the viewer stylesheets (tokens.css + style.css) as text for the exported page. */
+const loadViewerCss = async () => {
+  const parts = [];
+  for (const file of ['tokens.css', 'style.css']) {
+    let text = '';
+    try {
+      const response = await fetch(file);
+      if (response.ok) text = await response.text();
+    } catch (_err) {
+      text = '';
+    }
+    if (!text) {
+      const sheet = Array.from(document.styleSheets).find((s) => s.href && s.href.split(/[?#]/)[0].endsWith(`/${file}`));
+      try {
+        text = sheet ? Array.from(sheet.cssRules).map((rule) => rule.cssText).join('\n') : '';
+      } catch (_err) {
+        text = '';
+      }
+    }
+    parts.push(text);
+  }
+  return parts.join('\n').replace(/<\/style/gi, '<\\/style');
 };
 
+const sha256Base64 = async (text) => {
+  if (!(window.crypto && crypto.subtle)) return null;
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  let binary = '';
+  new Uint8Array(digest).forEach((b) => { binary += String.fromCharCode(b); });
+  return btoa(binary);
+};
+
+// JSON that is safe to place inside <script>…</script>.
+const scriptSafeJson = (value) => JSON.stringify(value)
+  .replace(/</g, '\\u003c')
+  .replace(/\u2028/g, '\\u2028')
+  .replace(/\u2029/g, '\\u2029');
+
 /**
- * Helper function to download a file
+ * Generates a standalone HTML page that looks like the viewer. All dynamic text is set with
+ * textContent at runtime, and a CSP with a script hash blocks anything that is not our script.
+ * Returns a Promise<string>.
  */
+const generateHTMLExport = async (conversations, metaMap = {}, order = Object.keys(conversations)) => {
+  const css = await loadViewerCss();
+  const entries = {};
+  order.forEach((key) => {
+    const { title, subtitle } = describeConversation(key, metaMap);
+    const when = shortTime((metaMap[key] && metaMap[key].originalExtractedAt) || parseConversationName(key).extractionTime || '');
+    const listSubtitle = [pluralize(Core.countMessages(conversations[key]), 'message'), when].filter(Boolean).join(' · ');
+    entries[key] = { title, subtitle, listSubtitle };
+  });
+  const exportedAt = new Date().toLocaleString();
+  const pageTitle = order.length === 1
+    ? `${entries[order[0]].title} — Teams chat export`
+    : `Teams chat export — ${exportedAt}`;
+
+  const script = `
+const conversations = ${scriptSafeJson(conversations)};
+const info = ${scriptSafeJson({ order, entries })};
+const Core = (${createViewerCore.toString()})();
+(${runExportedPage.toString()})(Core, conversations, info);
+`;
+  const hash = await sha256Base64(script);
+  const scriptSrc = hash ? `'sha256-${hash}'` : "'unsafe-inline'";
+  const csp = `default-src 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline'; script-src ${scriptSrc}; base-uri 'none'; form-action 'none'`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${csp}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(pageTitle)}</title>
+<style>
+${css}
+</style>
+</head>
+<body class="viewer is-export">
+<div id="main-content">
+  <nav id="sidebar" aria-labelledby="sidebar-heading">
+    <h2 id="sidebar-heading">Conversations <span class="count-badge">${order.length}</span></h2>
+    <ul id="chat-list" aria-labelledby="sidebar-heading"></ul>
+    <p class="sidebar-hint">Exported ${escapeHtml(exportedAt)} with Teams Chat Exporter</p>
+  </nav>
+  <main id="chat-area">
+    <header id="chat-header">
+      <div class="chat-header-row">
+        <span id="chat-avatar" class="avatar avatar-md" aria-hidden="true"></span>
+        <div class="chat-heading">
+          <h1 id="chat-title" class="chat-title"></h1>
+          <span id="chat-meta" class="chat-meta"></span>
+        </div>
+        <div class="you-control">
+          <label for="current-user-select">Viewing as:</label>
+          <select id="current-user-select"></select>
+        </div>
+      </div>
+      <div class="chat-header-row participants-row">
+        <span id="participants-label" class="participants-label">Participants</span>
+        <ul id="participants-list" class="participants-list" aria-labelledby="participants-label"></ul>
+      </div>
+    </header>
+    <div id="message-list" role="region" aria-label="Messages" tabindex="0"></div>
+  </main>
+</div>
+<noscript><p class="message-list-note">This export needs JavaScript to display messages.</p></noscript>
+<script>${script}</script>
+</body>
+</html>`;
+};
+
+/** Helper to download a file. */
 const downloadFile = (content, filename, mimeType) => {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -879,782 +769,487 @@ const downloadFile = (content, filename, mimeType) => {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+/**
+ * Normalises an uploaded JSON file into [{ name, messages, info }].
+ * Accepts { meta, conversations } (our enhanced export), { name: messages }, or a bare messages array.
+ */
+const normalizeUpload = (parsed, fileName) => {
+  let conversations = parsed;
+  let infoMap = {};
+  if (Array.isArray(parsed)) {
+    conversations = { [fileName.replace(/\.json$/i, '') || 'Imported chat']: parsed };
+  } else if (parsed && typeof parsed === 'object' && parsed.conversations && typeof parsed.conversations === 'object' && !Array.isArray(parsed.conversations)) {
+    conversations = parsed.conversations;
+    infoMap = (parsed.meta && parsed.meta.conversationInfo) || {};
+  }
+  if (!conversations || typeof conversations !== 'object') return [];
+
+  return Object.entries(conversations)
+    .filter(([, messages]) => Array.isArray(messages))
+    .map(([rawName, messages]) => {
+      const info = infoMap[rawName] || {};
+      const stripped = Core.stripPrefixes(rawName);
+      const name = (typeof info.name === 'string' && info.name.trim()) || stripped.cleanName || 'Untitled chat';
+      return {
+        name,
+        messages: messages.filter((m) => m && typeof m === 'object'),
+        originalExtractedAt: stripped.extractionTime || (info.savedAt ? new Date(info.savedAt).toLocaleString() : null)
+      };
+    });
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-  const chatList = document.getElementById('chat-list');
-  const chatTitle = document.getElementById('chat-title');
-  const messageList = document.getElementById('message-list');
-  const fileUpload = document.getElementById('file-upload');
-  const globalSearchInput = document.getElementById('global-search-input');
-  const conversationTab = document.querySelector('.fui-TabList .fui-Tab:nth-child(1)');
-  const sharedTab = document.querySelector('.fui-TabList .fui-Tab:nth-child(2)');
-  const chatAvatarContainer = document.querySelector('#chat-header .avatar-container');
-  const chatAvatarInitials = document.querySelector('#chat-header .chat-avatar-initials');
-  const downloadJsonButton = document.getElementById('download-json-button');
-  const downloadHtmlButton = document.getElementById('download-html-button');
-  const clearDataButton = document.getElementById('clear-data-button');
-  const currentUserDisplay = document.getElementById('current-user-display');
+  const $ = (id) => document.getElementById(id);
+  const chatList = $('chat-list');
+  const chatCount = $('chat-count');
+  const chatHeader = $('chat-header');
+  const chatTitle = $('chat-title');
+  const chatMeta = $('chat-meta');
+  const chatAvatar = $('chat-avatar');
+  const messageList = $('message-list');
+  const emptyState = $('empty-state');
+  const sidebarHint = $('sidebar-hint');
+  const fileUpload = $('file-upload');
+  const searchInput = $('global-search-input');
+  const searchCount = $('search-count');
+  const searchClear = $('search-clear');
+  const userSelect = $('current-user-select');
+  const participantsList = $('participants-list');
+  const exportButton = $('export-menu-button');
+  const toastRegion = $('toast-region');
+  const confirmDialogEl = $('confirm-dialog');
 
   let allConversations = {};
-  let currentConversationName = null;
+  let metaMap = {};
+  let selfPrefs = { byConversation: {}, last: null };
+  let currentKey = null;
   let currentUser = null;
-  let selectedUserOption = null;
+  let usingLegacyData = false;
 
-  // Consistent colors for participants
-  const participantColors = [
-    '#2196F3', // Blue
-    '#9C27B0', // Purple
-    '#4CAF50', // Green
-    '#FF9800', // Orange
-    '#F44336', // Red
-    '#00BCD4', // Cyan
-    '#E91E63', // Pink
-    '#795548', // Brown
-  ];
-
-  // Cache for author colors (consistent per conversation)
-  let authorColorMap = new Map();
-
-  // Function to generate initials and a random pastel background color
-  const generateAvatar = (name) => {
-    const words = name.split(' ').filter(word => word.length > 0);
-    let initials = '';
-    if (words.length >= 2) {
-      initials = words[0][0] + words[1][0];
-    } else if (words.length === 1) {
-      initials = words[0][0];
-    }
-
-    const pastelColors = [
-      '#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF',
-      '#E0BBE4', '#957DAD', '#D291BC', '#FFC72C', '#DA2C38'
-    ];
-    const randomColor = pastelColors[Math.floor(Math.random() * pastelColors.length)];
-
-    return { initials: initials.toUpperCase(), backgroundColor: randomColor };
+  // ---------- Toasts ----------
+  const showToast = (text, tone = 'info') => {
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${tone}`;
+    toast.textContent = text;
+    toastRegion.appendChild(toast);
+    setTimeout(() => {
+      toast.classList.add('toast-leaving');
+      setTimeout(() => toast.remove(), 250);
+    }, tone === 'error' ? 7000 : 4000);
   };
 
-  // Get participants in a conversation
-  const getConversationParticipants = (conversationName) => {
-    const messages = allConversations[conversationName] || [];
-    const participants = new Map();
+  // ---------- Confirm dialog ----------
+  const confirmDialog = ({ title, body, confirmLabel }) => new Promise((resolve) => {
+    $('confirm-title').textContent = title;
+    $('confirm-body').textContent = body;
+    $('confirm-ok').textContent = confirmLabel;
+    const previousFocus = document.activeElement;
+    const onClose = () => {
+      confirmDialogEl.removeEventListener('close', onClose);
+      if (previousFocus && document.contains(previousFocus)) previousFocus.focus();
+      resolve(confirmDialogEl.returnValue === 'confirm');
+    };
+    confirmDialogEl.returnValue = 'cancel';
+    confirmDialogEl.addEventListener('close', onClose);
+    confirmDialogEl.showModal();
+  });
 
-    messages.forEach(msg => {
-      if (msg.author && msg.author !== 'Unknown' && msg.type !== 'divider' && msg.type !== 'system') {
-        if (!participants.has(msg.author)) {
-          participants.set(msg.author, 0);
-        }
-        participants.set(msg.author, participants.get(msg.author) + 1);
+  // ---------- Menus (menu button pattern) ----------
+  const setupMenu = (button, menu) => {
+    const items = () => Array.from(menu.querySelectorAll('[role="menuitem"]:not([disabled])'));
+    const close = (returnFocus) => {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      button.setAttribute('aria-expanded', 'false');
+      if (returnFocus) button.focus();
+    };
+    const open = (focusLast) => {
+      document.querySelectorAll('.menu-list:not([hidden])').forEach((m) => { if (m !== menu) m.dispatchEvent(new CustomEvent('menu-close')); });
+      menu.hidden = false;
+      button.setAttribute('aria-expanded', 'true');
+      const list = items();
+      const target = focusLast ? list[list.length - 1] : list[0];
+      if (target) target.focus();
+    };
+    menu.addEventListener('menu-close', () => close(false));
+    button.addEventListener('click', () => (menu.hidden ? open(false) : close(false)));
+    button.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        open(event.key === 'ArrowUp');
       }
     });
-
-    // Sort by message count (most messages first)
-    return Array.from(participants.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ name, count }));
-  };
-
-  // Update participants display
-  const updateParticipantsDisplay = (conversationName) => {
-    const participantsList = document.getElementById('participants-list');
-    const userSelect = document.getElementById('current-user-select');
-
-    if (!participantsList || !userSelect) return;
-
-    const participants = getConversationParticipants(conversationName);
-
-    // Build author color map for this conversation
-    authorColorMap.clear();
-    participants.forEach((p, index) => {
-      authorColorMap.set(p.name, index);
-    });
-
-    // Update participants chips
-    participantsList.innerHTML = '';
-    participants.forEach((p, index) => {
-      const color = participantColors[index % participantColors.length];
-      const avatarData = generateAvatar(p.name);
-      const isYou = currentUser === p.name;
-
-      const chip = document.createElement('div');
-      chip.className = 'participant-chip' + (isYou ? ' is-you' : '');
-      chip.style.backgroundColor = color + '20'; // 20% opacity
-      chip.innerHTML = `
-        <div class="participant-avatar" style="background-color: ${color};">${avatarData.initials}</div>
-        <span>${p.name}</span>
-        <span style="color: #999; font-size: 10px;">(${p.count})</span>
-      `;
-      participantsList.appendChild(chip);
-    });
-
-    // Update user select dropdown
-    userSelect.innerHTML = '<option value="">Select yourself...</option>';
-    participants.forEach(p => {
-      const option = document.createElement('option');
-      option.value = p.name;
-      option.textContent = p.name;
-      if (currentUser === p.name) {
-        option.selected = true;
+    menu.addEventListener('keydown', (event) => {
+      const list = items();
+      const index = list.indexOf(document.activeElement);
+      const move = (i) => { event.preventDefault(); list[(i + list.length) % list.length].focus(); };
+      switch (event.key) {
+        case 'ArrowDown': move(index + 1); break;
+        case 'ArrowUp': move(index - 1); break;
+        case 'Home': move(0); break;
+        case 'End': move(list.length - 1); break;
+        case 'Escape': event.preventDefault(); close(true); break;
+        case 'Tab': close(false); break;
+        default: break;
       }
-      userSelect.appendChild(option);
+    });
+    menu.addEventListener('click', (event) => {
+      if (event.target.closest('[role="menuitem"]')) close(true);
+    });
+    document.addEventListener('pointerdown', (event) => {
+      if (!menu.hidden && !menu.contains(event.target) && !button.contains(event.target)) close(false);
     });
   };
+  setupMenu(exportButton, $('export-menu'));
+  setupMenu($('more-menu-button'), $('more-menu'));
 
-  // Handle user selection change
-  const setupUserSelect = () => {
-    const userSelect = document.getElementById('current-user-select');
-    if (userSelect) {
-      userSelect.addEventListener('change', (e) => {
-        currentUser = e.target.value || null;
-        if (currentConversationName) {
-          updateParticipantsDisplay(currentConversationName);
-          renderMessages(currentConversationName, globalSearchInput.value);
-        }
-      });
-    }
+  // ---------- Storage helpers ----------
+  const storageGet = (keys) => new Promise((resolve) => chrome.storage.local.get(keys, (r) => resolve(r || {})));
+  const storageSet = (values) => new Promise((resolve) => chrome.storage.local.set(values, () => resolve()));
+  const storageRemove = (keys) => new Promise((resolve) => chrome.storage.local.remove(keys, () => resolve()));
+
+  // Read-modify-write so a stale viewer tab never drops entries another tab just saved.
+  const mutateConversations = async (mutator) => {
+    const result = await storageGet([STORAGE_KEYS.data, STORAGE_KEYS.meta]);
+    // When only the legacy teamsChatData was shown, promote it into savedExtractions first.
+    const data = { ...(usingLegacyData ? allConversations : {}), ...(result[STORAGE_KEYS.data] || {}) };
+    const meta = { ...(result[STORAGE_KEYS.meta] || {}) };
+    const outcome = mutator(data, meta);
+    await storageSet({ [STORAGE_KEYS.data]: data, [STORAGE_KEYS.meta]: meta });
+    allConversations = data;
+    metaMap = meta;
+    usingLegacyData = false;
+    return outcome;
   };
 
-  // Function to extract clean name and extraction info from timestamped names
-  const parseConversationName = (fullName) => {
-    // Check if name has timestamp prefix like "[8/29/2025, 11:28:21 AM] Name"
-    const timestampMatch = fullName.match(/^\[([^\]]+)\]\s*(.+)$/);
-    if (timestampMatch) {
-      const extractionTime = timestampMatch[1];
-      const cleanName = timestampMatch[2];
-      return { cleanName, extractionTime, isTimestamped: true };
-    }
-    return { cleanName: fullName, extractionTime: null, isTimestamped: false };
+  const orderedKeys = () => Object.keys(allConversations).reverse(); // newest saved first
+
+  // ---------- Sidebar ----------
+  const setRovingItem = (button) => {
+    chatList.querySelectorAll('.chat-list-item-main, .chat-list-item-delete-button').forEach((b) => { b.tabIndex = -1; });
+    if (!button) return;
+    button.tabIndex = 0;
+    const del = button.parentElement.querySelector('.chat-list-item-delete-button');
+    if (del) del.tabIndex = 0;
   };
 
-  // Function to render the chat list
+  const findItemButton = (key) => Array.from(chatList.querySelectorAll('.chat-list-item-main')).find((b) => b.dataset.key === key) || null;
+
   const renderChatList = () => {
-    chatList.innerHTML = '';
-    for (const name in allConversations) {
-      const listItem = document.createElement('li');
-      listItem.classList.add('chat-list-item');
-      listItem.dataset.conversationName = name;
+    chatList.replaceChildren();
+    const keys = orderedKeys();
+    chatCount.textContent = keys.length ? String(keys.length) : '';
+    keys.forEach((key) => {
+      const { title, subtitle, subtitleTitle } = describeConversation(key, metaMap);
+      const { item, button } = Core.buildChatListItem({ key, title, subtitle, subtitleTitle });
+      button.addEventListener('click', () => selectConversation(key));
+      button.addEventListener('focus', () => setRovingItem(button));
 
-      const { cleanName, extractionTime } = parseConversationName(name);
-      const avatarData = generateAvatar(cleanName);
-
-      listItem.innerHTML = `
-        <div class="chat-list-item-avatar-wrapper">
-          <div class="chat-list-item-avatar" style="background-color: ${avatarData.backgroundColor};">
-            <span class="chat-list-item-initials">${avatarData.initials}</span>
-          </div>
-        </div>
-        <div class="chat-list-item-content">
-          <div class="chat-list-item-header">
-            <span class="chat-list-item-title">${cleanName}</span>
-          </div>
-          <div class="chat-list-item-extraction-date">${extractionTime || ''}</div>
-        </div>
-        <div class="chat-list-item-actions">
-          <button type="button" class="chat-list-item-delete-button" title="Delete conversation">
-            <svg fill="currentColor" aria-hidden="true" width="1em" height="1em" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M8.5 4h3a1.5 1.5 0 0 0-3 0Zm-1 0a2.5 2.5 0 0 1 5 0h5a.5.5 0 0 1 0 1h-1.05l-1.2 10.34A3 3 0 0 1 12.27 18H7.73a3 3 0 0 1-2.98-2.66L3.55 5H2.5a.5.5 0 0 1 0-1h5ZM5.74 15.23A2 2 0 0 0 7.73 17h4.54a2 2 0 0 0 1.99-1.77L15.44 5H4.56l1.18 10.23ZM8.5 7.5c.28 0 .5.22.5.5v6a.5.5 0 0 1-1 0V8c0-.28.22-.5.5-.5Zm3.5.5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V8Z" fill="currentColor"></path></svg>
-          </button>
-        </div>
-      `;
-
-      listItem.addEventListener('click', (e) => {
-        // Don't trigger if delete button was clicked
-        if (e.target.closest('.chat-list-item-delete-button')) {
-          return;
-        }
-        // Remove active class from previous item
-        const currentActive = document.querySelector('.chat-list-item.active');
-        if (currentActive) {
-          currentActive.classList.remove('active');
-        }
-        // Add active class to clicked item
-        listItem.classList.add('active');
-        currentConversationName = name; // Set current conversation (use full name for data lookup)
-        updateParticipantsDisplay(name); // Update participants display
-        renderMessages(name, globalSearchInput.value, avatarData.initials, avatarData.backgroundColor); // Render all messages for the selected conversation
-      });
-
-      // Delete button handler
-      const deleteBtn = listItem.querySelector('.chat-list-item-delete-button');
-      deleteBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (confirm(`Delete "${cleanName}"?\n\nThis will remove this conversation from the viewer.`)) {
-          delete allConversations[name];
-
-          // Update storage
-          chrome.storage.local.set({ savedExtractions: allConversations });
-
-          // If this was the current conversation, clear the view
-          if (currentConversationName === name) {
-            currentConversationName = null;
-            chatTitle.textContent = 'Select a conversation';
-            messageList.innerHTML = '';
-          }
-
-          // Re-render the list
-          renderChatList();
-
-          // Select first remaining conversation if any
-          const remainingNames = Object.keys(allConversations);
-          if (remainingNames.length > 0 && !currentConversationName) {
-            const firstItem = document.querySelector('.chat-list-item');
-            if (firstItem) {
-              firstItem.click();
-            }
-          }
-        }
-      });
-
-      chatList.appendChild(listItem);
-    }
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'chat-list-item-delete-button icon-button';
+      del.setAttribute('aria-label', `Delete ${title}`);
+      del.title = 'Delete conversation';
+      del.innerHTML = '<svg fill="currentColor" aria-hidden="true" width="16" height="16" viewBox="0 0 20 20"><path d="M8.5 4h3a1.5 1.5 0 0 0-3 0Zm-1 0a2.5 2.5 0 0 1 5 0h5a.5.5 0 0 1 0 1h-1.05l-1.2 10.34A3 3 0 0 1 12.27 18H7.73a3 3 0 0 1-2.98-2.66L3.55 5H2.5a.5.5 0 0 1 0-1h5ZM5.74 15.23A2 2 0 0 0 7.73 17h4.54a2 2 0 0 0 1.99-1.77L15.44 5H4.56l1.18 10.23ZM8.5 7.5c.28 0 .5.22.5.5v6a.5.5 0 0 1-1 0V8c0-.28.22-.5.5-.5Zm3.5.5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0V8Z"/></svg>';
+      del.addEventListener('click', () => requestDelete(key));
+      item.appendChild(del);
+      chatList.appendChild(item);
+    });
+    const activeButton = currentKey ? findItemButton(currentKey) : null;
+    setRovingItem(activeButton || chatList.querySelector('.chat-list-item-main'));
+    markActive();
   };
 
-  // Function to render messages for a selected conversation, with optional search term and avatar data
-  const renderMessages = (conversationName, searchTerm = '', initials = '', backgroundColor = '') => {
-    const { cleanName } = parseConversationName(conversationName);
-    chatTitle.textContent = cleanName;
-    
-    // Update avatar
-    chatAvatarInitials.textContent = initials;
-    chatAvatarContainer.style.backgroundColor = backgroundColor;
+  const markActive = () => {
+    chatList.querySelectorAll('.chat-list-item-main').forEach((b) => {
+      const active = b.dataset.key === currentKey;
+      b.parentElement.classList.toggle('active', active);
+      if (active) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+    });
+  };
 
-    messageList.innerHTML = '';
-    let messages = allConversations[conversationName];
-
-    if (!messages || messages.length === 0) {
-      messageList.innerHTML = '<p style="text-align: center; color: #666;">No messages in this conversation.</p>';
+  chatList.addEventListener('keydown', (event) => {
+    const buttons = Array.from(chatList.querySelectorAll('.chat-list-item-main'));
+    const onMain = event.target.classList.contains('chat-list-item-main');
+    const index = buttons.indexOf(event.target.closest('.chat-list-item')?.querySelector('.chat-list-item-main'));
+    if (index === -1) return;
+    const targetIndex = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: buttons.length - 1 }[event.key];
+    if (targetIndex !== undefined) {
+      event.preventDefault();
+      const target = buttons[Math.max(0, Math.min(buttons.length - 1, targetIndex))];
+      if (target) target.focus();
       return;
     }
-
-    // Filter messages if a search term is provided
-    if (searchTerm) {
-      const lowerCaseSearchTerm = searchTerm.toLowerCase();
-      messages = messages.filter((msg) => {
-        const authorText = (msg.author || '').toLowerCase();
-        const bodyText = (msg.message || msg.content || '').toLowerCase();
-        return authorText.includes(lowerCaseSearchTerm) || bodyText.includes(lowerCaseSearchTerm);
-      });
-      if (messages.length === 0) {
-        messageList.innerHTML = '<p style="text-align: center; color: #666;">No messages found matching your search.</p>';
-        return;
-      }
-    }
-
-    let lastAuthor = null;
-    let lastTimestamp = null;
-    const TIME_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes in milliseconds
-
-    messages.forEach((msg) => {
-      if (msg.type === 'divider') {
-        const dividerEl = document.createElement('div');
-        dividerEl.classList.add('message-divider');
-        dividerEl.textContent = msg.message;
-        messageList.appendChild(dividerEl);
-        lastAuthor = null;
-        lastTimestamp = null;
-        return;
-      }
-
-      const messageContainer = document.createElement('div');
-      messageContainer.classList.add('message-container');
-
-      const timestampDate = msg.isoTimestamp ? new Date(msg.isoTimestamp) : (msg.timestamp ? new Date(msg.timestamp) : null);
-      const timestampMillis = timestampDate && !Number.isNaN(timestampDate.getTime())
-        ? timestampDate.getTime()
-        : null;
-
-      const authorLabel = msg.author || 'Unknown';
-      const messageType = msg.type || null;
-      const isSystemMessage = messageType === 'system';
-
-      if (!isSystemMessage) {
-        if (
-          msg.author !== lastAuthor ||
-          (lastTimestamp !== null && timestampMillis !== null && (timestampMillis - lastTimestamp) > TIME_THRESHOLD_MS)
-        ) {
-          const messageDetails = document.createElement('div');
-          messageDetails.classList.add('message-details');
-          let detailsText = msg.timestamp ? authorLabel + ' - ' + msg.timestamp : authorLabel;
-          if (msg.edited) {
-            detailsText += ' (edited)';
-          }
-          messageDetails.textContent = detailsText;
-          messageContainer.appendChild(messageDetails);
-        } else {
-          messageContainer.classList.add('consecutive-message');
-        }
-      }
-
-      const messageBubble = document.createElement('div');
-      messageBubble.classList.add('message-bubble');
-
-      const isFromCurrentUser = currentUser && msg.author === currentUser;
-      const bubbleType = messageType || (isFromCurrentUser ? 'sent' : 'received');
-      const isSent = bubbleType === 'sent';
-
-      // Add author index for color coding
-      const authorIndex = authorColorMap.get(msg.author);
-      if (authorIndex !== undefined && !isSent) {
-        messageBubble.setAttribute('data-author-index', authorIndex % 5);
-      }
-
-      messageContainer.classList.add(bubbleType);
-
-      if (isSystemMessage) {
-        messageContainer.style.textAlign = 'center';
-      } else if (isSent) {
-        messageBubble.classList.add('sent-message');
-        messageContainer.style.textAlign = 'right';
-      }
-
-      // Add reply preview if present
-      if (msg.replyTo && msg.replyTo.text) {
-        const replyDiv = document.createElement('div');
-        replyDiv.className = 'reply-preview';
-        replyDiv.innerHTML = `
-          <div class="reply-author">${escapeHtml(msg.replyTo.author || 'Unknown')}</div>
-          <div class="reply-text">${escapeHtml(msg.replyTo.text.substring(0, 100))}${msg.replyTo.text.length > 100 ? '...' : ''}</div>
-        `;
-        messageBubble.appendChild(replyDiv);
-      }
-
-      const messageText = document.createElement('div');
-      const messageBody = (msg.message || msg.content || '').trim();
-      if (!messageBody && (!Array.isArray(msg.attachments) || msg.attachments.length === 0)) {
-        return;
-      }
-      messageText.textContent = messageBody;
-
-      messageBubble.appendChild(messageText);
-
-      // Add attachments display if present
-      if (msg.attachments && msg.attachments.length > 0) {
-        const attachmentsDiv = document.createElement('div');
-        attachmentsDiv.className = 'message-attachments';
-        msg.attachments.forEach(att => {
-          const attEl = document.createElement('div');
-          attEl.className = 'attachment-item';
-          if (att.href) {
-            attEl.innerHTML = `<a href="${escapeHtml(att.href)}" target="_blank" rel="noopener">${escapeHtml(att.label || att.text || 'Attachment')}</a>`;
-          } else {
-            attEl.textContent = att.label || att.text || 'Attachment';
-          }
-          if (att.type) {
-            const typeSpan = document.createElement('span');
-            typeSpan.className = 'attachment-type';
-            typeSpan.textContent = ` [${att.type}]`;
-            attEl.appendChild(typeSpan);
-          }
-          if (att.size) {
-            const sizeSpan = document.createElement('span');
-            sizeSpan.className = 'attachment-size';
-            sizeSpan.textContent = ` (${att.size})`;
-            attEl.appendChild(sizeSpan);
-          }
-          attachmentsDiv.appendChild(attEl);
-        });
-        messageBubble.appendChild(attachmentsDiv);
-      }
-
-      // Add embedded images if present
-      if (msg.embeddedImages && msg.embeddedImages.length > 0) {
-        const imagesDiv = document.createElement('div');
-        imagesDiv.className = 'message-images';
-        imagesDiv.style.cssText = 'margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;';
-        msg.embeddedImages.forEach(img => {
-          if (img.isEmoji) return; // Skip emojis, they're inline
-          const imgContainer = document.createElement('div');
-          imgContainer.style.cssText = 'position: relative; display: inline-block;';
-
-          const imgEl = document.createElement('img');
-          imgEl.src = img.src;
-          imgEl.alt = img.alt || 'Image';
-          imgEl.style.cssText = 'max-width: 300px; max-height: 200px; border-radius: 8px; cursor: pointer;';
-          imgEl.title = 'Click to open full size';
-          imgEl.addEventListener('click', () => window.open(img.src, '_blank'));
-
-          const downloadBtn = document.createElement('button');
-          downloadBtn.textContent = 'Download';
-          downloadBtn.style.cssText = 'position: absolute; bottom: 8px; right: 8px; padding: 4px 8px; font-size: 10px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 4px; cursor: pointer; opacity: 0; transition: opacity 0.2s;';
-          downloadBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const a = document.createElement('a');
-            a.href = img.src;
-            a.download = img.alt || 'image';
-            a.click();
-          });
-
-          imgContainer.addEventListener('mouseenter', () => downloadBtn.style.opacity = '1');
-          imgContainer.addEventListener('mouseleave', () => downloadBtn.style.opacity = '0');
-
-          imgContainer.appendChild(imgEl);
-          imgContainer.appendChild(downloadBtn);
-          imagesDiv.appendChild(imgContainer);
-        });
-        if (imagesDiv.children.length > 0) {
-          messageBubble.appendChild(imagesDiv);
-        }
-      }
-
-      // Add reactions display if present
-      if (msg.reactions && msg.reactions.length > 0) {
-        const reactionsDiv = document.createElement('div');
-        reactionsDiv.className = 'message-reactions';
-        msg.reactions.forEach(r => {
-          const chip = document.createElement('span');
-          chip.className = 'reaction-chip';
-          chip.textContent = `${r.emoji} ${r.count}`;
-          chip.title = r.users?.join(', ') || '';
-          reactionsDiv.appendChild(chip);
-        });
-        messageBubble.appendChild(reactionsDiv);
-      }
-
-      messageContainer.appendChild(messageBubble);
-      messageList.appendChild(messageContainer);
-
-      if (isSystemMessage) {
-        lastAuthor = null;
-        if (timestampMillis !== null) {
-          lastTimestamp = timestampMillis;
-        }
-      } else {
-        lastAuthor = msg.author;
-        if (timestampMillis !== null) {
-          lastTimestamp = timestampMillis;
-        }
-      }
-    });
-    messageList.scrollTop = messageList.scrollHeight; // Scroll to bottom
-  };
-
-  const getAllUsers = () => {
-    const users = new Set();
-    Object.values(allConversations).forEach((messages) => {
-      messages.forEach((msg) => {
-        if (msg.author && msg.author.trim()) {
-          users.add(msg.author);
-        }
-      });
-    });
-    return Array.from(users).sort();
-  };
-
-  const getUserMessageCount = (userName) => {
-    let count = 0;
-    Object.values(allConversations).forEach((messages) => {
-      messages.forEach((msg) => {
-        if (msg.author === userName) {
-          count += 1;
-        }
-      });
-    });
-    return count;
-  };
-
-  const showUserSelection = () => {
-    const modal = document.getElementById('user-selection-modal');
-    const userList = document.getElementById('user-list');
-    const confirmButton = document.getElementById('confirm-btn');
-
-    if (!modal || !userList || !confirmButton) {
-      return;
-    }
-
-    const users = getAllUsers();
-
-    userList.innerHTML = '';
-    selectedUserOption = null;
-
-    users.forEach((userName) => {
-      const messageCount = getUserMessageCount(userName);
-      const avatarData = generateAvatar(userName);
-
-      const userOption = document.createElement('div');
-      userOption.className = 'user-option';
-      userOption.dataset.userName = userName;
-
-      if (currentUser === userName) {
-        userOption.classList.add('selected');
-        selectedUserOption = userOption;
-      }
-
-      userOption.innerHTML = `
-        <div class="user-avatar" style="background-color: ${avatarData.backgroundColor};">
-          ${avatarData.initials}
-        </div>
-        <div class="user-info">
-          <div class="user-name">${userName}</div>
-          <div class="user-message-count">${messageCount} messages</div>
-        </div>
-      `;
-
-      userOption.addEventListener('click', () => {
-        if (selectedUserOption) {
-          selectedUserOption.classList.remove('selected');
-        }
-        userOption.classList.add('selected');
-        selectedUserOption = userOption;
-        confirmButton.disabled = false;
-      });
-
-      userList.appendChild(userOption);
-    });
-
-    modal.style.display = 'flex';
-    confirmButton.disabled = !selectedUserOption;
-  };
-
-  const closeUserSelection = () => {
-    const modal = document.getElementById('user-selection-modal');
-    if (modal) {
-      modal.style.display = 'none';
-    }
-    selectedUserOption = null;
-  };
-
-  const confirmUserSelection = () => {
-    if (selectedUserOption) {
-      currentUser = selectedUserOption.dataset.userName;
-      if (currentUserDisplay) {
-        currentUserDisplay.textContent = 'You: ' + currentUser;
-      }
-      if (currentConversationName) {
-        renderMessages(currentConversationName);
-      }
-    }
-    closeUserSelection();
-  };
-
-  window.showUserSelection = showUserSelection;
-  window.closeUserSelection = closeUserSelection;
-  window.confirmUserSelection = confirmUserSelection;
-
-  // Handle file upload
-  fileUpload.addEventListener('change', (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const uploadedData = JSON.parse(e.target.result);
-          
-          // Add uploaded data with timestamp prefix instead of replacing
-          const timestamp = new Date().toLocaleString();
-          const fileName = file.name.replace('.json', '');
-          
-          Object.keys(uploadedData).forEach(conversationName => {
-            const newName = `[${fileName}] ${conversationName}`;
-            allConversations[newName] = uploadedData[conversationName];
-          });
-          
-          renderChatList();
-          
-          // Automatically select the first uploaded conversation
-          const firstUploadedName = `[${fileName}] ${Object.keys(uploadedData)[0]}`;
-          if (Object.keys(uploadedData).length > 0) {
-            const firstListItem = document.querySelector(`[data-conversation-name="${firstUploadedName}"]`);
-            if (firstListItem) {
-              // Remove active from previous items
-              document.querySelectorAll('.chat-list-item').forEach(item => {
-                item.classList.remove('active');
-              });
-              firstListItem.classList.add('active');
-              
-              currentConversationName = firstUploadedName;
-              const avatarData = generateAvatar(firstUploadedName);
-              renderMessages(firstUploadedName, '', avatarData.initials, avatarData.backgroundColor);
-            }
-          }
-          
-          globalSearchInput.value = ''; // Clear search on new upload
-        } catch (error) {
-          alert('Invalid JSON file. Please upload a valid JSON.');
-          console.error('Error parsing JSON:', error);
-        }
-      };
-      reader.readAsText(file);
+    if (onMain && (event.key === 'Delete' || event.key === 'Backspace')) {
+      event.preventDefault();
+      requestDelete(buttons[index].dataset.key);
     }
   });
 
-  // Handle JSON download
-  downloadJsonButton.addEventListener('click', () => {
-    if (Object.keys(allConversations).length === 0) {
-      alert('No data to download. Please upload a JSON file first.');
-      return;
-    }
-    const dataStr = JSON.stringify(allConversations, null, 2);
-    const blob = new Blob([dataStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'teams_chat_data.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  });
-
-  // Handle HTML download
-  downloadHtmlButton.addEventListener('click', () => {
-    if (Object.keys(allConversations).length === 0) {
-      alert('No data to export. Please upload a JSON file or extract conversations first.');
-      return;
-    }
-    const htmlContent = generateHTMLExport(allConversations);
-    const blob = new Blob([htmlContent], { type: 'text/html' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-    a.download = `teams-chat-export-${timestamp}.html`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  });
-
-  // Handle CSV download
-  const downloadCsvButton = document.getElementById('download-csv-button');
-  if (downloadCsvButton) {
-    downloadCsvButton.addEventListener('click', () => {
-      if (Object.keys(allConversations).length === 0) {
-        alert('No data to export. Please upload a JSON file or extract conversations first.');
-        return;
-      }
-      const csvContent = generateCSVExport(allConversations);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      downloadFile(csvContent, `teams-chat-export-${timestamp}.csv`, 'text/csv');
+  const requestDelete = async (key) => {
+    const { title } = describeConversation(key, metaMap);
+    const ok = await confirmDialog({
+      title: `Delete “${title}”?`,
+      body: 'This removes the saved copy from the viewer. It does not affect the chat in Teams.',
+      confirmLabel: 'Delete'
     });
-  }
-
-  // Handle TXT download
-  const downloadTxtButton = document.getElementById('download-txt-button');
-  if (downloadTxtButton) {
-    downloadTxtButton.addEventListener('click', () => {
-      if (Object.keys(allConversations).length === 0) {
-        alert('No data to export. Please upload a JSON file or extract conversations first.');
-        return;
-      }
-      const txtContent = generateTXTExport(allConversations);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      downloadFile(txtContent, `teams-chat-export-${timestamp}.txt`, 'text/plain');
+    if (!ok) return;
+    const keysBefore = orderedKeys();
+    const position = keysBefore.indexOf(key);
+    await mutateConversations((data, meta) => {
+      delete data[key];
+      delete meta[key];
     });
-  }
-
-  // Global search functionality
-  globalSearchInput.addEventListener('input', () => {
-    if (currentConversationName) {
-      renderMessages(currentConversationName, globalSearchInput.value);
+    const keysAfter = orderedKeys();
+    if (currentKey === key) {
+      currentKey = keysAfter[Math.min(position, keysAfter.length - 1)] || null;
     }
-  });
+    refresh();
+    const next = currentKey ? findItemButton(currentKey) : null;
+    if (next) next.focus();
+    showToast(`Deleted “${title}”.`);
+  };
 
-  // Tab functionality
-  if (conversationTab) {
-    conversationTab.addEventListener('click', () => {
-      conversationTab.classList.add('active');
-      sharedTab.classList.remove('active');
-      // In a real scenario, you'd load conversation-specific content here
-    });
-  }
+  // ---------- Header & messages ----------
+  const selfFor = (title, participants) => {
+    const names = participants.map((p) => p.name);
+    const stored = selfPrefs.byConversation[title];
+    if (stored && names.includes(stored)) return stored;
+    if (selfPrefs.last && names.includes(selfPrefs.last)) return selfPrefs.last;
+    return null;
+  };
 
-  if (sharedTab) {
-    sharedTab.addEventListener('click', () => {
-      sharedTab.classList.add('active');
-      conversationTab.classList.remove('active');
-      // In a real scenario, you'd load shared content here
-    });
-  }
+  const renderCurrent = ({ keepScroll = false } = {}) => {
+    if (!currentKey || !allConversations[currentKey]) return;
+    const messages = allConversations[currentKey];
+    const { title, subtitle } = describeConversation(currentKey, metaMap);
+    const participants = Core.getParticipants(messages);
+    const authorIndex = Core.buildAuthorIndex(participants);
+    currentUser = selfFor(title, participants);
 
-  // Initial load: check if data is passed from background script
-  chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (request.action === "displayData" && request.data) {
-      // Merge new conversations with existing ones instead of replacing
-      const timestamp = new Date().toLocaleString();
-      Object.keys(request.data).forEach(conversationName => {
-        const newName = `[${timestamp}] ${conversationName}`;
-        allConversations[newName] = request.data[conversationName];
-      });
-      
-      renderChatList();
-      // Optionally select the first NEW conversation by default
-      const newConversationNames = Object.keys(request.data).map(name => `[${timestamp}] ${name}`);
-      if (newConversationNames.length > 0) {
-        const firstNewName = newConversationNames[0];
-        const firstListItem = document.querySelector(`[data-conversation-name="${firstNewName}"]`);
-        if (firstListItem) {
-          // Remove active from previous items
-          document.querySelectorAll('.chat-list-item').forEach(item => {
-            item.classList.remove('active');
-          });
-          firstListItem.classList.add('active');
-        }
-        currentConversationName = firstNewName; // Set current conversation
-        const firstAvatarData = generateAvatar(firstNewName);
-        renderMessages(firstNewName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
-      }
-    }
-  });
+    chatTitle.textContent = title;
+    chatTitle.title = title;
+    Core.fillAvatar(chatAvatar, title);
+    chatMeta.textContent = [pluralize(Core.countMessages(messages), 'message'), subtitle].filter(Boolean).join(' · ');
 
-  // Handle clear data button
-  clearDataButton.addEventListener('click', () => {
-    if (confirm('Are you sure you want to clear all conversation data? This cannot be undone.')) {
-      allConversations = {};
-      currentConversationName = null;
-      currentUser = null;
-      if (currentUserDisplay) {
-        currentUserDisplay.textContent = 'No user selected';
-      }
-      chrome.storage.local.remove(['teamsChatData', 'savedExtractions']);
-      renderChatList();
-      document.getElementById('chat-title').textContent = 'Select a conversation';
-      document.getElementById('message-list').innerHTML = '';
-    }
-  });
+    userSelect.replaceChildren(new Option('Not set', ''));
+    participants.forEach((p) => userSelect.appendChild(new Option(p.name, p.name, false, p.name === currentUser)));
+    userSelect.value = currentUser || '';
+    Core.renderParticipants(participantsList, participants, { currentUser, authorIndex });
 
-  // Load both current extraction and all saved extractions
-  // Set up the user select dropdown handler
-  setupUserSelect();
+    const term = searchInput.value.trim();
+    const previousScroll = messageList.scrollTop;
+    const { matches } = Core.renderMessages(messageList, messages, { currentUser, searchTerm: term, authorIndex });
+    searchCount.textContent = term ? (matches ? pluralize(matches, 'match', 'matches') : 'No matches') : '';
+    searchClear.hidden = !searchInput.value;
+    if (keepScroll) messageList.scrollTop = previousScroll;
+    else messageList.scrollTop = term ? 0 : messageList.scrollHeight;
+  };
 
-  chrome.storage.local.get(['teamsChatData', 'savedExtractions'], (result) => {
-    const savedExtractions = result.savedExtractions || {};
-    const teamsChatData = result.teamsChatData || {};
+  const selectConversation = (key) => {
+    if (!allConversations[key]) return;
+    currentKey = key;
+    markActive();
+    renderCurrent();
+  };
 
-    const hasSavedExtracts = Object.keys(savedExtractions).length > 0;
-    const hasCurrentExtraction = Object.keys(teamsChatData).length > 0;
-
-    if (hasSavedExtracts) {
-      allConversations = savedExtractions;
-    } else if (hasCurrentExtraction) {
-      allConversations = teamsChatData;
-    }
+  const refresh = () => {
+    const keys = orderedKeys();
+    const empty = keys.length === 0;
+    if (currentKey && !allConversations[currentKey]) currentKey = null;
+    if (!currentKey && !empty) currentKey = keys[0];
 
     renderChatList();
-    if (Object.keys(allConversations).length > 0) {
-      const firstConversationName = Object.keys(allConversations)[0];
-      const firstListItem = document.querySelector(`[data-conversation-name="${firstConversationName}"]`);
-      if (firstListItem) {
-        firstListItem.classList.add('active');
-      }
-      currentConversationName = firstConversationName; // Set current conversation
-      updateParticipantsDisplay(firstConversationName); // Show participants
-      const firstAvatarData = generateAvatar(firstConversationName);
-      renderMessages(firstConversationName, '', firstAvatarData.initials, firstAvatarData.backgroundColor);
+    emptyState.hidden = !empty;
+    chatHeader.hidden = empty;
+    messageList.hidden = empty;
+    sidebarHint.hidden = keys.length < 2;
+    exportButton.disabled = empty;
+    $('clear-data-button').disabled = empty;
+    searchInput.disabled = empty;
+    if (empty) {
+      messageList.replaceChildren();
+      searchCount.textContent = '';
+      chatList.appendChild(Object.assign(document.createElement('li'), { className: 'chat-list-empty', textContent: 'Nothing saved yet.' }));
+    } else {
+      renderCurrent();
     }
-    if (!currentUser) {
-      const users = getAllUsers();
-      if (users.length === 1) {
-        currentUser = users[0];
-        const userSelect = document.getElementById('current-user-select');
-        if (userSelect) userSelect.value = currentUser;
-      } else if (users.length > 1) {
-        setTimeout(() => {
-          if (!currentUser) {
-            showUserSelection();
-          }
-        }, 300);
-      }
+  };
+
+  userSelect.addEventListener('change', () => {
+    const { title } = describeConversation(currentKey, metaMap);
+    const value = userSelect.value || null;
+    const byConversation = { ...selfPrefs.byConversation };
+    if (value) byConversation[title] = value; else delete byConversation[title];
+    selfPrefs = { byConversation, last: value || selfPrefs.last };
+    // Clearing the choice for this chat should not immediately re-apply the global fallback.
+    if (!value) selfPrefs.last = null;
+    storageSet({ [STORAGE_KEYS.self]: selfPrefs });
+    renderCurrent({ keepScroll: true });
+  });
+
+  // ---------- Search ----------
+  searchInput.addEventListener('input', () => renderCurrent());
+  searchInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && searchInput.value) {
+      event.preventDefault();
+      searchInput.value = '';
+      renderCurrent();
     }
+  });
+  searchClear.addEventListener('click', () => {
+    searchInput.value = '';
+    renderCurrent();
+    searchInput.focus();
+  });
+
+  // ---------- Upload ----------
+  const openFilePicker = () => fileUpload.click();
+  $('upload-button').addEventListener('click', openFilePicker);
+  $('empty-upload-button').addEventListener('click', openFilePicker);
+
+  fileUpload.addEventListener('change', () => {
+    const file = fileUpload.files && fileUpload.files[0];
+    fileUpload.value = '';
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => showToast(`Couldn’t read ${file.name}.`, 'error');
+    reader.onload = async () => {
+      let entries;
+      try {
+        entries = normalizeUpload(JSON.parse(reader.result), file.name);
+      } catch (error) {
+        console.error('Error parsing JSON:', error);
+        showToast(`${file.name} isn’t valid JSON.`, 'error');
+        return;
+      }
+      if (!entries.length) {
+        showToast(`${file.name} doesn’t contain any chats this viewer understands.`, 'error');
+        return;
+      }
+      const now = new Date();
+      const stamp = now.toLocaleString();
+      const newKeys = await mutateConversations((data, meta) => {
+        const keys = [];
+        entries.forEach((entry) => {
+          let key = `[${stamp}] ${entry.name}`;
+          for (let n = 2; key in data; n += 1) key = `[${stamp} #${n}] ${entry.name}`;
+          data[key] = entry.messages;
+          meta[key] = {
+            name: entry.name,
+            source: 'upload',
+            fileName: file.name,
+            savedAt: now.toISOString(),
+            ...(entry.originalExtractedAt ? { originalExtractedAt: entry.originalExtractedAt } : {})
+          };
+          keys.push(key);
+        });
+        return keys;
+      });
+      searchInput.value = '';
+      currentKey = newKeys[0];
+      refresh();
+      showToast(`Imported ${pluralize(newKeys.length, 'chat')} from ${file.name}.`, 'success');
+    };
+    reader.readAsText(file);
+  });
+
+  // ---------- Export ----------
+  const exportAll = async (format) => {
+    const keys = orderedKeys();
+    if (!keys.length) {
+      showToast('Nothing to export yet. Extract a chat or upload a JSON export first.', 'error');
+      return;
+    }
+    const ordered = {};
+    keys.forEach((k) => { ordered[k] = allConversations[k]; });
+    const slug = timestampSlug();
+    try {
+      if (format === 'json') {
+        downloadFile(generateEnhancedJSONExport(ordered, metaMap), `teams-chat-export-${slug}.json`, 'application/json');
+      } else if (format === 'csv') {
+        downloadFile(generateCSVExport(ordered), `teams-chat-export-${slug}.csv`, 'text/csv');
+      } else if (format === 'txt') {
+        downloadFile(generateTXTExport(ordered), `teams-chat-export-${slug}.txt`, 'text/plain');
+      } else if (format === 'html') {
+        downloadFile(await generateHTMLExport(ordered, metaMap, keys), `teams-chat-export-${slug}.html`, 'text/html');
+      }
+      showToast(`Exported ${pluralize(keys.length, 'chat')} as ${format.toUpperCase()}.`, 'success');
+    } catch (error) {
+      console.error('Export failed:', error);
+      showToast(`Export failed: ${error.message}`, 'error');
+    }
+  };
+  $('export-menu').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-export]');
+    if (item) exportAll(item.dataset.export);
+  });
+
+  // ---------- Clear all ----------
+  $('clear-data-button').addEventListener('click', async () => {
+    const count = Object.keys(allConversations).length;
+    const ok = await confirmDialog({
+      title: 'Clear all data?',
+      body: `This permanently removes ${pluralize(count, 'saved chat')} and your “You” choices from this browser. Export first if you want to keep a copy.`,
+      confirmLabel: 'Clear all data'
+    });
+    if (!ok) return;
+    await storageRemove([STORAGE_KEYS.data, STORAGE_KEYS.meta, STORAGE_KEYS.legacy, STORAGE_KEYS.self]);
+    allConversations = {};
+    metaMap = {};
+    selfPrefs = { byConversation: {}, last: null };
+    currentKey = null;
+    searchInput.value = '';
+    refresh();
+    showToast('All saved chats were cleared.');
+  });
+
+  // ---------- Loading ----------
+  const load = async () => {
+    const result = await storageGet([STORAGE_KEYS.data, STORAGE_KEYS.meta, STORAGE_KEYS.legacy, STORAGE_KEYS.self]);
+    const saved = result[STORAGE_KEYS.data] || {};
+    const legacy = result[STORAGE_KEYS.legacy] || {};
+    usingLegacyData = Object.keys(saved).length === 0 && Object.keys(legacy).length > 0;
+    allConversations = usingLegacyData ? legacy : saved;
+    metaMap = result[STORAGE_KEYS.meta] || {};
+    const self = result[STORAGE_KEYS.self] || {};
+    selfPrefs = { byConversation: self.byConversation || {}, last: self.last || null };
+  };
+
+  // Picks the newest stored entry for a chat name (used by the legacy displayData message).
+  const newestKeyFor = (name) => orderedKeys().find((k) => describeConversation(k, metaMap).title === name) || null;
+
+  chrome.runtime.onMessage.addListener((request) => {
+    if (request && request.action === 'displayData') {
+      // Older background pages pushed the extraction here; it is already in storage, so just reload.
+      load().then(() => {
+        const wanted = (Array.isArray(request.keys) && request.keys.find((k) => allConversations[k])) ||
+          (request.data && newestKeyFor(Object.keys(request.data)[0]));
+        if (wanted) currentKey = wanted;
+        refresh();
+      });
+    }
+  });
+
+  if (chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !(changes[STORAGE_KEYS.data] || changes[STORAGE_KEYS.meta])) return;
+      const nextData = changes[STORAGE_KEYS.data] ? (changes[STORAGE_KEYS.data].newValue || {}) : allConversations;
+      if (changes[STORAGE_KEYS.meta]) metaMap = changes[STORAGE_KEYS.meta].newValue || {};
+      const before = Object.keys(allConversations).join('\n');
+      allConversations = nextData;
+      usingLegacyData = false;
+      if (Object.keys(allConversations).join('\n') !== before) refresh();
+    });
+  }
+
+  const params = new URLSearchParams(location.search);
+  load().then(() => {
+    const requested = params.get('select');
+    if (requested && allConversations[requested]) currentKey = requested;
+    refresh();
   });
 });
