@@ -1,0 +1,95 @@
+/*
+ * Shared design tokens for the extension's own pages (popup, viewer, exported HTML).
+ * Injected Teams UI uses the --tce-* copies in transcriptStyles.css so it never
+ * leaks variables into the host page.
+ */
+:root {
+  color-scheme: light dark;
+
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  --color-bg: #f5f5f5;
+  --color-surface: #ffffff;
+  --color-surface-2: #f0f0f3;
+  --color-border: #e0e0e0;
+  --color-text: #242424;
+  --color-text-muted: #5c5c5c;
+  --color-text-on-accent: #ffffff;
+
+  --color-accent: #5b5fc7;
+  --color-accent-hover: #4f52b2;
+  --color-accent-subtle: #e8ebfa;
+
+  --color-danger: #c4314b;
+  --color-danger-hover: #a72037;
+  --color-danger-subtle: #fde7e9;
+  --color-success: #107c10;
+  --color-success-subtle: #dff6dd;
+  --color-warning: #8a5a00;
+  --color-warning-subtle: #fff4ce;
+
+  --focus-ring: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.12);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #1f1f1f;
+    --color-surface: #292929;
+    --color-surface-2: #333333;
+    --color-border: #3d3d3d;
+    --color-text: #f0f0f0;
+    --color-text-muted: #b3b3b3;
+    --color-accent: #7f85f5;
+    --color-accent-hover: #9299f7;
+    --color-accent-subtle: #2f2f4a;
+    --color-text-on-accent: #111111;
+    --color-danger: #f1707b;
+    --color-danger-hover: #f48b94;
+    --color-danger-subtle: #3e1f25;
+    --color-success: #54b054;
+    --color-success-subtle: #1f3320;
+    --color-warning: #f2c661;
+    --color-warning-subtle: #3d3220;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #1f1f1f;
+  --color-surface: #292929;
+  --color-surface-2: #333333;
+  --color-border: #3d3d3d;
+  --color-text: #f0f0f0;
+  --color-text-muted: #b3b3b3;
+  --color-accent: #7f85f5;
+  --color-accent-hover: #9299f7;
+  --color-accent-subtle: #2f2f4a;
+  --color-text-on-accent: #111111;
+  --color-danger: #f1707b;
+  --color-danger-hover: #f48b94;
+  --color-danger-subtle: #3e1f25;
+  --color-success: #54b054;
+  --color-success-subtle: #1f3320;
+  --color-warning: #f2c661;
+  --color-warning-subtle: #3d3220;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
