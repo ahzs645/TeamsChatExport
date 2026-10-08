@@ -1,234 +1,93 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Teams Extractor</title>
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      width: 250px;
-      padding: 15px;
-      background-color: #f4f4f9;
-    }
-    .header {
-      text-align: center;
-      margin-bottom: 15px;
-    }
-    img {
-      width: 48px;
-      height: 48px;
-    }
-    h1 {
-      font-size: 16px;
-      color: #333;
-      margin: 8px 0;
-    }
-    .section {
-      background: white;
-      border-radius: 8px;
-      padding: 12px;
-      margin-bottom: 10px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-    .section-title {
-      font-size: 12px;
-      font-weight: bold;
-      color: #666;
-      margin-bottom: 8px;
-      text-transform: uppercase;
-    }
-    .toggle-container {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 8px;
-    }
-    .toggle {
-      position: relative;
-      width: 44px;
-      height: 24px;
-      background-color: #ddd;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: background-color 0.3s;
-    }
-    .toggle.active {
-      background-color: #5B5FC5;
-    }
-    .toggle-slider {
-      position: absolute;
-      top: 2px;
-      left: 2px;
-      width: 20px;
-      height: 20px;
-      background-color: white;
-      border-radius: 50%;
-      transition: transform 0.3s;
-    }
-    .toggle.active .toggle-slider {
-      transform: translateX(20px);
-    }
-    .current-chat {
-      font-size: 11px;
-      color: #333;
-      background: #f8f9fa;
-      padding: 8px;
-      border-radius: 4px;
-      text-align: center;
-      margin-bottom: 8px;
-      border: 1px solid #e9ecef;
-    }
-    button {
-      width: 100%;
-      padding: 10px;
-      border: none;
-      border-radius: 5px;
-      cursor: pointer;
-      font-size: 13px;
-      font-weight: bold;
-      transition: background-color 0.3s;
-      margin-bottom: 8px;
-    }
-    .btn-primary {
-      background-color: #5B5FC5;
-      color: white;
-    }
-    .btn-primary:hover {
-      background-color: #4a4d9e;
-    }
-    .btn-secondary {
-      background-color: #6c757d;
-      color: white;
-    }
-    .btn-secondary:hover {
-      background-color: #545b62;
-    }
-    .btn-secondary:disabled {
-      background-color: #ccc;
-      cursor: not-allowed;
-    }
-    .section-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      cursor: pointer;
-      user-select: none;
-    }
-    .section-header .chevron {
-      font-size: 10px;
-      color: #666;
-      transition: transform 0.2s;
-    }
-    .section-header.expanded .chevron {
-      transform: rotate(180deg);
-    }
-    .collapsible-content {
-      max-height: 0;
-      overflow: hidden;
-      transition: max-height 0.2s ease-out;
-    }
-    .collapsible-content.expanded {
-      max-height: 200px;
-    }
-    .setting-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 8px;
-    }
-    .setting-row label {
-      font-size: 12px;
-      color: #333;
-    }
-    .setting-row input {
-      width: 70px;
-      padding: 4px 8px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 12px;
-      text-align: right;
-    }
-    .setting-row input:focus {
-      outline: none;
-      border-color: #5B5FC5;
-    }
-    .settings-info {
-      font-size: 11px;
-      color: #666;
-      text-align: center;
-      padding: 6px;
-      background: #f8f9fa;
-      border-radius: 4px;
-      margin-top: 4px;
-    }
-  </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teams Chat Exporter</title>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <div class="header">
-    <img src="assets/icon48.png" alt="Teams Chat Exporter">
-    <h1>Teams Chat Exporter</h1>
-  </div>
-
-  <div class="section">
-    <div class="section-title">Current Chat</div>
-    <div class="current-chat" id="currentChat">Loading...</div>
-    <button id="extractActiveChatBtn" class="btn-primary" style="background-color: #28a745;">
-      Extract This Chat
-    </button>
-  </div>
-
-  <div class="section" id="transcriptSection" style="display: none;">
-    <div class="section-title">Transcript</div>
-    <div class="current-chat" id="transcriptStatus">Checking...</div>
-    <button id="copyTranscriptBtn" class="btn-primary" style="background-color: #17a2b8;">
-      Copy Transcript
-    </button>
-    <button id="downloadVttBtn" class="btn-secondary">
-      Download VTT
-    </button>
-    <button id="downloadTxtBtn" class="btn-secondary">
-      Download TXT
-    </button>
-    <button id="batchTranscriptBtn" class="btn-secondary" style="background-color: #ff6b35; color: white; margin-top: 4px;">
-      Batch Download All Meetings
-    </button>
-    <div id="videoDownloadSection" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #eee;">
-      <div class="section-title" style="margin-bottom: 6px;">Video Download</div>
-      <div id="videoMethodBtns" style="display: flex; gap: 4px;"></div>
+  <header class="header">
+    <img class="header-icon" src="assets/icon48.png" alt="">
+    <div class="header-text">
+      <h1>Teams Chat Exporter</h1>
+      <span class="chip" id="pageChip" data-tone="neutral"><span class="chip-label" id="pageChipLabel">Checking page…</span></span>
     </div>
-  </div>
+  </header>
 
-  <div class="section">
-    <div class="section-title">View Results</div>
-    <button id="openResultsBtn" class="btn-primary">Open Viewer</button>
-  </div>
+  <p class="status" id="statusLine" role="status" aria-live="polite"></p>
 
-  <div class="section">
-    <div class="section-header" id="settingsHeader">
-      <div class="section-title" style="margin-bottom: 0;">Advanced Settings</div>
-      <span class="chevron">&#9660;</span>
-    </div>
-    <div class="collapsible-content" id="settingsContent">
-      <div style="padding-top: 10px;">
-        <div class="setting-row">
-          <label>Max Mode</label>
-          <div class="toggle" id="maxModeToggle">
-            <div class="toggle-slider"></div>
-          </div>
-        </div>
-        <div class="setting-row">
-          <label for="pageSize">Page Size</label>
-          <input type="number" id="pageSize" min="1" max="500" value="200">
-        </div>
-        <div class="setting-row">
-          <label for="maxPages">Max Pages</label>
-          <input type="number" id="maxPages" min="1" max="200" value="15">
-        </div>
-        <div class="settings-info" id="maxMessagesInfo">
-          Up to 3,000 messages
+  <main id="cards">
+    <!-- Chat export: primary on Teams chat pages -->
+    <section class="card card-primary" id="chatCard" aria-labelledby="chatCardTitle">
+      <h2 class="card-title" id="chatCardTitle">Export this chat</h2>
+      <p class="card-text">Collects every message in the open chat and opens it in the viewer, where you can save it as JSON, CSV, TXT or HTML.</p>
+      <button type="button" class="btn btn-primary" id="extractActiveChatBtn" aria-describedby="extractHint">Extract this chat</button>
+      <p class="hint" id="extractHint"></p>
+    </section>
+
+    <!-- Video download: primary on recording pages -->
+    <section class="card card-primary" id="videoCard" aria-labelledby="videoCardTitle" hidden>
+      <h2 class="card-title" id="videoCardTitle">Meeting recording</h2>
+      <p class="card-text">Save this recording as a video file. Keep the tab open while it downloads.</p>
+      <button type="button" class="btn btn-primary" id="videoPrimaryBtn" aria-describedby="videoPrimaryHint">Download video</button>
+      <p class="hint" id="videoPrimaryHint"></p>
+      <details class="more" id="videoMore" hidden>
+        <summary>Other methods</summary>
+        <ul class="method-list" id="videoMethodList"></ul>
+      </details>
+    </section>
+
+    <!-- Transcript: only on recording pages -->
+    <section class="card" id="transcriptCard" aria-labelledby="transcriptCardTitle" hidden>
+      <h2 class="card-title" id="transcriptCardTitle">Transcript</h2>
+      <span class="pill" id="transcriptStatus" data-tone="neutral">Checking for a transcript…</span>
+      <div class="stack">
+        <button type="button" class="btn btn-secondary" id="copyTranscriptBtn">Copy transcript</button>
+        <div class="grid-2">
+          <button type="button" class="btn btn-secondary" id="downloadVttBtn">Download subtitles (.vtt)</button>
+          <button type="button" class="btn btn-secondary" id="downloadTxtBtn">Download text (.txt)</button>
         </div>
       </div>
-    </div>
+      <hr class="divider">
+      <button type="button" class="btn btn-secondary" id="batchTranscriptBtn" aria-describedby="batchHint">Download all meeting transcripts</button>
+      <p class="hint" id="batchHint">Opens a panel on the page that saves the transcript of every meeting in this series.</p>
+    </section>
+  </main>
+
+  <div class="viewer-row">
+    <button type="button" class="btn btn-link" id="openResultsBtn">Open viewer</button>
+    <p class="hint">See and export chats you've extracted.</p>
   </div>
+
+  <section class="card" aria-labelledby="settingsHeader">
+    <h2 class="settings-heading">
+      <button type="button" class="disclosure" id="settingsHeader" aria-expanded="false" aria-controls="settingsContent">
+        <span>Advanced settings</span>
+        <span class="disclosure-chevron" aria-hidden="true"></span>
+      </button>
+    </h2>
+    <div class="settings-body" id="settingsContent" hidden>
+      <p class="hint settings-intro">These limits apply when you extract a chat.</p>
+      <div class="setting">
+        <label for="maxMode">Fetch full history</label>
+        <input type="checkbox" role="switch" class="switch" id="maxMode" aria-describedby="maxModeHint">
+        <p class="hint" id="maxModeHint">Fetch as many messages as possible. Slower for long chats.</p>
+      </div>
+      <div class="setting">
+        <label for="pageSize">Messages per request</label>
+        <input type="number" id="pageSize" min="1" max="500" value="200" inputmode="numeric" aria-describedby="pageSizeHint">
+        <p class="hint" id="pageSizeHint">How many messages to fetch at a time (up to 500).</p>
+      </div>
+      <div class="setting">
+        <label for="maxPages">Maximum requests</label>
+        <input type="number" id="maxPages" min="1" max="200" value="15" inputmode="numeric" aria-describedby="maxPagesHint">
+        <p class="hint" id="maxPagesHint">Stop after this many requests (up to 200).</p>
+      </div>
+      <p class="readout" id="maxMessagesInfo" aria-live="polite">Up to 3,000 messages</p>
+    </div>
+  </section>
 
   <script src="popup.js"></script>
 </body>
