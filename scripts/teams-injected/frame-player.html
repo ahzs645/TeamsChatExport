@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Frame gating - player</title>
+<link rel="stylesheet" href="https://ext.test/transcriptStyles.css">
+<style>body{margin:0;font:14px "Segoe UI",sans-serif;background:#fff}video{width:480px;height:270px;background:#000}</style>
+<script src="boot.js"></script>
+<script src="https://ext.test/ui/tceUI.js"></script>
+<script src="https://ext.test/content.js"></script>
+</head><body>
+<!-- Stream-in-Teams: the recap meeting picker and the player both live in this iframe -->
+<div data-testid="intelligent-recap-instance-select-dropdown" role="combobox">Oct 1, 2026</div>
+<video id="player"></video>
+<div id="teams-chat-exporter-transcript-data" style="display:none" data-vtt="WEBVTT&#10;&#10;1&#10;00:00:00.000 --> 00:00:01.000&#10;hi"></div>
+<script>Object.defineProperty(document.getElementById('player'), 'duration', { get: () => 600 });</script>
+</body></html>
