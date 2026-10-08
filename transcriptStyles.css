@@ -1,113 +1,200 @@
-/* === Native Toolbar Button Styles (Recap Action Toolbar) === */
+/*
+ * Teams Chat Exporter - styles for UI injected into Teams / SharePoint Stream.
+ *
+ * Rules:
+ *  - every class is prefixed `tce-`;
+ *  - toolbar buttons that live inside Teams' own toolbars inherit the host
+ *    colour (currentColor) so they match light, dark and high-contrast themes;
+ *  - floating UI (panels, toasts, menus) defines its own --tce-* variables on
+ *    its own root elements (.tce-root, .tce-menu), mirroring tokens.css. The
+ *    theme is chosen by JS (ui/tceUI.js detectTheme) via data-tce-theme, with
+ *    prefers-color-scheme as the fallback when the attribute is missing.
+ */
+
+/* ===================================================================== */
+/* Tokens (light default)                                                 */
+/* ===================================================================== */
+
+.tce-root,
+.tce-menu {
+	--tce-font: "Segoe UI", "Segoe UI Web (West European)", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
+	--tce-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	--tce-radius-sm: 4px;
+	--tce-radius-md: 8px;
+
+	--tce-bg: #f5f5f5;
+	--tce-surface: #ffffff;
+	--tce-surface-2: #f0f0f3;
+	--tce-border: #e0e0e0;
+	--tce-text: #242424;
+	--tce-text-muted: #5c5c5c;
+	--tce-text-on-accent: #ffffff;
+	--tce-accent: #5b5fc7;
+	--tce-accent-hover: #4f52b2;
+	--tce-accent-subtle: #e8ebfa;
+	--tce-danger: #c4314b;
+	--tce-danger-hover: #a72037;
+	--tce-danger-subtle: #fde7e9;
+	--tce-success: #107c10;
+	--tce-success-subtle: #dff6dd;
+	--tce-warning: #8a5a00;
+	--tce-warning-subtle: #fff4ce;
+	--tce-hover: rgba(0, 0, 0, 0.05);
+	--tce-pressed: rgba(0, 0, 0, 0.09);
+	--tce-shadow: 0 8px 24px rgba(0, 0, 0, 0.14), 0 1px 3px rgba(0, 0, 0, 0.1);
+	--tce-focus: 0 0 0 2px var(--tce-surface), 0 0 0 4px var(--tce-accent);
+
+	color-scheme: light;
+}
+
+.tce-root[data-tce-theme="dark"],
+.tce-menu[data-tce-theme="dark"] {
+	--tce-bg: #1f1f1f;
+	--tce-surface: #292929;
+	--tce-surface-2: #333333;
+	--tce-border: #3d3d3d;
+	--tce-text: #f0f0f0;
+	--tce-text-muted: #b3b3b3;
+	--tce-text-on-accent: #111111;
+	--tce-accent: #7f85f5;
+	--tce-accent-hover: #9299f7;
+	--tce-accent-subtle: #2f2f4a;
+	--tce-danger: #f1707b;
+	--tce-danger-hover: #f48b94;
+	--tce-danger-subtle: #3e1f25;
+	--tce-success: #54b054;
+	--tce-success-subtle: #1f3320;
+	--tce-warning: #f2c661;
+	--tce-warning-subtle: #3d3220;
+	--tce-hover: rgba(255, 255, 255, 0.07);
+	--tce-pressed: rgba(255, 255, 255, 0.12);
+	--tce-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+	color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+	.tce-root:not([data-tce-theme]),
+	.tce-menu:not([data-tce-theme]) {
+		--tce-bg: #1f1f1f;
+		--tce-surface: #292929;
+		--tce-surface-2: #333333;
+		--tce-border: #3d3d3d;
+		--tce-text: #f0f0f0;
+		--tce-text-muted: #b3b3b3;
+		--tce-text-on-accent: #111111;
+		--tce-accent: #7f85f5;
+		--tce-accent-hover: #9299f7;
+		--tce-accent-subtle: #2f2f4a;
+		--tce-danger: #f1707b;
+		--tce-danger-hover: #f48b94;
+		--tce-danger-subtle: #3e1f25;
+		--tce-success: #54b054;
+		--tce-success-subtle: #1f3320;
+		--tce-warning: #f2c661;
+		--tce-warning-subtle: #3d3220;
+		--tce-hover: rgba(255, 255, 255, 0.07);
+		--tce-pressed: rgba(255, 255, 255, 0.12);
+		--tce-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+		color-scheme: dark;
+	}
+}
+
+/* Local reset so host page styles (Teams/SharePoint) don't bleed in. */
+.tce-root *,
+.tce-root *::before,
+.tce-root *::after,
+.tce-menu * {
+	box-sizing: border-box;
+	letter-spacing: normal;
+	text-transform: none;
+}
+
+.tce-offscreen {
+	position: fixed !important;
+	left: -9999px !important;
+	top: 0 !important;
+	opacity: 0 !important;
+}
+
+/* ===================================================================== */
+/* Buttons injected into Teams toolbars (inherit host colour)            */
+/* ===================================================================== */
 
 /* Icon-only buttons injected into Teams' recap action toolbar */
 .tce-toolbar-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
+	gap: 2px;
 	min-width: 32px;
 	height: 32px;
+	margin: 0;
 	padding: 5px;
 	border-radius: 4px;
 	border: 1px solid transparent;
 	background: transparent;
-	color: rgb(214, 214, 214);
+	color: inherit;
+	font: inherit;
 	cursor: pointer;
 	transition: background-color 0.1s ease;
-	position: relative;
 	box-sizing: border-box;
 }
 
-.tce-toolbar-btn:hover {
-	background: rgba(255, 255, 255, 0.08);
+.tce-toolbar-btn:hover,
+.tce-cmd-btn:hover {
+	background: color-mix(in srgb, currentColor 9%, transparent);
 }
 
-.tce-toolbar-btn:active {
-	background: rgba(255, 255, 255, 0.12);
+.tce-toolbar-btn:active,
+.tce-toolbar-btn[aria-expanded="true"],
+.tce-cmd-btn:active {
+	background: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.tce-toolbar-btn:focus-visible,
+.tce-cmd-btn:focus-visible {
+	outline: 2px solid currentColor;
+	outline-offset: -2px;
 }
 
 .tce-toolbar-btn svg {
 	width: 20px;
 	height: 20px;
-	fill: currentColor;
+	flex: none;
 }
 
-/* Feedback state for copy button */
-.tce-toolbar-btn.tce-copied {
-	color: #00ff88;
+.tce-toolbar-btn svg.tce-chevron,
+.tce-cmd-btn svg.tce-chevron {
+	width: 8px;
+	height: 5px;
 }
 
-/* Tooltip for toolbar buttons */
-.tce-toolbar-btn[title] {
-	position: relative;
-}
-
-/* Download dropdown menu */
-.tce-download-dropdown {
-	position: absolute;
-	top: 100%;
-	left: 50%;
-	transform: translateX(-50%);
-	margin-top: 4px;
-	background: #292929;
-	border: 1px solid #404040;
-	border-radius: 6px;
-	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-	z-index: 100000;
-	min-width: 140px;
-	padding: 4px 0;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-}
-
-.tce-download-dropdown-item {
-	display: block;
-	width: 100%;
-	padding: 8px 16px;
-	border: none;
-	background: transparent;
-	color: #d6d6d6;
-	font-size: 13px;
-	text-align: left;
-	cursor: pointer;
-	transition: background-color 0.1s ease;
-	box-sizing: border-box;
-}
-
-.tce-download-dropdown-item:hover {
-	background: rgba(255, 255, 255, 0.08);
-}
-
-/* === Transcript Actions Menubar Buttons (CommandBar style) === */
-
+/* Transcript actions menubar buttons (CommandBar style) and recap bar */
 .tce-cmd-btn {
 	display: inline-flex;
 	align-items: center;
-	height: 42px;
-	padding: 0 12px;
-	border: none;
+	gap: 6px;
+	height: 32px;
+	margin: 0;
+	padding: 0 10px;
+	border: 1px solid transparent;
+	border-radius: 4px;
 	background: transparent;
-	color: rgb(214, 214, 214);
+	color: inherit;
+	font-family: inherit;
 	font-size: 13px;
 	font-weight: 400;
+	line-height: 1;
 	cursor: pointer;
-	font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif;
-	transition: background-color 0.1s ease;
 	white-space: nowrap;
-	gap: 6px;
-}
-
-.tce-cmd-btn:hover {
-	background: rgba(255, 255, 255, 0.06);
-}
-
-.tce-cmd-btn:active {
-	background: rgba(255, 255, 255, 0.1);
+	transition: background-color 0.1s ease;
+	align-self: center;
 }
 
 .tce-cmd-btn svg {
 	width: 16px;
 	height: 16px;
-	fill: currentColor;
+	flex: none;
 }
 
 /* Separator between native and extension buttons */
@@ -115,305 +202,584 @@
 	display: inline-block;
 	width: 1px;
 	height: 20px;
-	background: rgba(255, 255, 255, 0.15);
+	background: currentColor;
+	opacity: 0.25;
 	margin: 0 4px;
 	vertical-align: middle;
 	align-self: center;
 }
 
-/* === Video Download Panel Styles === */
-#video-download-panel {
-	position: fixed;
-	top: 60px;
-	right: 10px;
-	z-index: 10000;
-	background: linear-gradient(135deg, #1a1a2e, #16213e);
-	border: 2px solid #00d4ff;
-	border-radius: 12px;
-	padding: 16px;
-	min-width: 300px;
-	max-width: 350px;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	color: #ffffff;
-	box-shadow: 0 8px 32px rgba(0, 212, 255, 0.2);
-}
-
-#video-download-panel .vdp-header {
+/* teams.cloud.microsoft recap page bar */
+.tce-recap-bar {
 	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	margin-bottom: 12px;
-	font-size: 15px;
-	font-weight: 600;
-	color: #00d4ff;
-}
-
-#video-download-panel .vdp-close {
-	background: none;
-	border: none;
-	color: #888;
-	font-size: 20px;
-	cursor: pointer;
-	padding: 0 4px;
-	line-height: 1;
-}
-
-#video-download-panel .vdp-close:hover {
-	color: #fff;
-}
-
-#video-download-panel .vdp-stats {
-	background: rgba(0, 0, 0, 0.3);
-	padding: 10px 12px;
-	border-radius: 8px;
-	margin-bottom: 12px;
-	font-size: 13px;
-}
-
-#video-download-panel .vdp-stats div {
-	margin: 4px 0;
-}
-
-#video-download-panel .vdp-progress {
-	height: 8px;
-	background: #333;
-	border-radius: 4px;
-	margin-bottom: 12px;
-	overflow: hidden;
-}
-
-#video-download-panel .vdp-progress-fill {
-	height: 100%;
-	background: linear-gradient(90deg, #00d4ff, #00ff88);
-	width: 0%;
-	transition: width 0.3s ease;
-	border-radius: 4px;
-}
-
-#video-download-panel .vdp-status {
-	font-size: 12px;
-	color: #aaa;
-	margin-bottom: 12px;
-	padding: 8px;
-	background: rgba(0, 0, 0, 0.2);
-	border-radius: 6px;
-	min-height: 18px;
-}
-
-#video-download-panel .vdp-buttons {
-	display: flex;
-	gap: 8px;
 	flex-wrap: wrap;
-	margin-bottom: 10px;
-}
-
-#video-download-panel .vdp-btn {
-	padding: 10px 14px;
-	border: none;
-	border-radius: 6px;
-	cursor: pointer;
-	font-weight: 600;
-	font-size: 12px;
-	transition: transform 0.1s, opacity 0.2s;
-}
-
-#video-download-panel .vdp-btn:disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
-}
-
-#video-download-panel .vdp-btn:not(:disabled):hover {
-	transform: translateY(-1px);
-}
-
-#video-download-panel .vdp-btn:not(:disabled):active {
-	transform: translateY(1px);
-}
-
-#video-download-panel .vdp-capture {
-	background: linear-gradient(135deg, #00d4ff, #0099cc);
-	color: #000;
-}
-
-#video-download-panel .vdp-stop {
-	background: #ff4757;
-	color: #fff;
-}
-
-#video-download-panel .vdp-download {
-	background: linear-gradient(135deg, #00ff88, #00cc6a);
-	color: #000;
-}
-
-#video-download-panel .vdp-tip {
-	font-size: 10px;
-	color: #666;
-	line-height: 1.4;
-	padding: 8px;
-	background: rgba(0, 0, 0, 0.2);
-	border-radius: 4px;
-	word-break: break-word;
-}
-
-/* === Batch Transcript Panel Styles === */
-#batch-transcript-panel {
-	position: fixed;
-	top: 60px;
-	right: 10px;
-	z-index: 10000;
-	background: linear-gradient(135deg, #1a1a2e, #16213e);
-	border: 2px solid #ff9a56;
-	border-radius: 12px;
-	padding: 16px;
-	min-width: 320px;
-	max-width: 380px;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-	color: #ffffff;
-	box-shadow: 0 8px 32px rgba(255, 154, 86, 0.2);
-}
-
-#batch-transcript-panel .btp-header {
-	display: flex;
-	justify-content: space-between;
+	gap: 2px;
+	padding: 4px 8px;
 	align-items: center;
-	margin-bottom: 12px;
-	font-size: 15px;
-	font-weight: 600;
-	color: #ff9a56;
+	justify-content: flex-end;
+	color: inherit;
 }
 
-#batch-transcript-panel .btp-close {
-	background: none;
-	border: none;
-	color: #888;
-	font-size: 20px;
-	cursor: pointer;
-	padding: 0 4px;
-	line-height: 1;
-	width: auto;
+/* Copied feedback: swap to a check icon; keep host colour for contrast. */
+.tce-toolbar-btn.tce-copied,
+.tce-cmd-btn.tce-copied {
+	background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* ===================================================================== */
+/* Dropdown menu (appended to <body>, fixed-positioned)                  */
+/* ===================================================================== */
+
+.tce-menu {
+	position: fixed;
+	z-index: 2147483001;
+	min-width: 168px;
+	padding: 4px;
 	margin: 0;
+	background: var(--tce-surface);
+	color: var(--tce-text);
+	border: 1px solid var(--tce-border);
+	border-radius: var(--tce-radius-md);
+	box-shadow: var(--tce-shadow);
+	font: 400 14px/20px var(--tce-font);
 }
 
-#batch-transcript-panel .btp-close:hover {
-	color: #fff;
+.tce-menu__item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	min-height: 32px;
+	margin: 0;
+	padding: 6px 10px;
+	border: none;
+	border-radius: var(--tce-radius-sm);
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
 }
 
-#batch-transcript-panel .btp-stats {
-	background: rgba(0, 0, 0, 0.3);
-	padding: 10px 12px;
-	border-radius: 8px;
-	margin-bottom: 12px;
-	font-size: 13px;
+.tce-menu__item svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+	color: var(--tce-text-muted);
 }
 
-#batch-transcript-panel .btp-stats div {
-	margin: 4px 0;
+.tce-menu__item:hover,
+.tce-menu__item:focus {
+	background: var(--tce-hover);
+	outline: none;
 }
 
-#batch-transcript-panel .btp-progress {
-	height: 8px;
-	background: #333;
-	border-radius: 4px;
-	margin-bottom: 12px;
-	overflow: hidden;
+.tce-menu__item:focus-visible {
+	box-shadow: inset 0 0 0 2px var(--tce-accent);
 }
 
-#batch-transcript-panel .btp-progress-fill {
-	height: 100%;
-	background: linear-gradient(90deg, #ff9a56, #ff6b35);
-	width: 0%;
-	transition: width 0.3s ease;
-	border-radius: 4px;
-}
+/* ===================================================================== */
+/* Stack: one fixed top-right column for all panels and toasts           */
+/* ===================================================================== */
 
-#batch-transcript-panel .btp-status {
-	font-size: 12px;
-	color: #aaa;
-	margin-bottom: 12px;
-	padding: 8px;
-	background: rgba(0, 0, 0, 0.2);
-	border-radius: 6px;
-	min-height: 18px;
-}
-
-#batch-transcript-panel .btp-log {
-	max-height: 150px;
+.tce-stack {
+	position: fixed;
+	top: 56px;
+	right: 0;
+	z-index: 2147483000;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 8px;
+	/* padding leaves room for the children's shadows inside the scroller */
+	padding: 4px 12px 16px 16px;
+	max-height: calc(100vh - 56px);
 	overflow-y: auto;
-	margin-bottom: 12px;
-	font-size: 11px;
-	background: rgba(0, 0, 0, 0.3);
-	border-radius: 6px;
-	padding: 8px;
+	overscroll-behavior: contain;
+	pointer-events: none;
+	font: 400 14px/20px var(--tce-font);
+	color: var(--tce-text);
+	scrollbar-width: thin;
 }
 
-#batch-transcript-panel .btp-log:empty {
+.tce-stack:empty {
 	display: none;
 }
 
-#batch-transcript-panel .btp-log-line {
-	padding: 2px 0;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+.tce-stack > * {
+	pointer-events: auto;
+	flex: none;
 }
 
-#batch-transcript-panel .btp-log-success {
-	color: #00ff88;
+/* ===================================================================== */
+/* Panels                                                                */
+/* ===================================================================== */
+
+.tce-panel {
+	width: min(380px, calc(100vw - 24px));
+	margin: 0;
+	background: var(--tce-surface);
+	color: var(--tce-text);
+	border: 1px solid var(--tce-border);
+	border-radius: var(--tce-radius-md);
+	box-shadow: var(--tce-shadow);
+	font: 400 14px/20px var(--tce-font);
+	text-align: left;
 }
 
-#batch-transcript-panel .btp-log-warn {
-	color: #ffc107;
+.tce-panel--wide {
+	width: min(420px, calc(100vw - 24px));
 }
 
-#batch-transcript-panel .btp-log-error {
-	color: #ff4757;
+.tce-panel:focus {
+	outline: none;
 }
 
-#batch-transcript-panel .btp-log-info {
-	color: #aaa;
-}
-
-#batch-transcript-panel .btp-buttons {
+.tce-panel__header {
 	display: flex;
+	align-items: center;
+	justify-content: space-between;
 	gap: 8px;
-	flex-wrap: wrap;
+	padding: 10px 8px 4px 16px;
 }
 
-#batch-transcript-panel .btp-btn {
-	padding: 10px 14px;
-	border: none;
-	border-radius: 6px;
-	cursor: pointer;
+.tce-panel__title {
+	margin: 0;
+	font-size: 14px;
 	font-weight: 600;
+	line-height: 20px;
+	color: var(--tce-text);
+}
+
+.tce-panel__body {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 4px 16px 12px;
+}
+
+.tce-panel__footer {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	padding: 0 16px 16px;
+}
+
+.tce-panel__footer:empty {
+	display: none;
+}
+
+.tce-panel p,
+.tce-hint {
+	margin: 0;
 	font-size: 12px;
-	transition: transform 0.1s, opacity 0.2s;
-	width: auto;
+	line-height: 16px;
+	color: var(--tce-text-muted);
+}
+
+/* Stats as a compact definition grid */
+.tce-stats {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	gap: 4px 12px;
+	margin: 0;
+	padding: 8px 12px;
+	background: var(--tce-surface-2);
+	border-radius: var(--tce-radius-sm);
+	font-size: 13px;
+}
+
+.tce-stats dt {
+	margin: 0;
+	color: var(--tce-text-muted);
+}
+
+.tce-stats dd {
+	margin: 0;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	color: var(--tce-text);
+}
+
+/* Status line (aria-live) */
+.tce-status {
+	margin: 0;
+	padding: 8px 10px;
+	min-height: 36px;
+	border-radius: var(--tce-radius-sm);
+	background: var(--tce-surface-2);
+	color: var(--tce-text);
+	font-size: 13px;
+	line-height: 18px;
+	overflow-wrap: anywhere;
+}
+
+.tce-status--success { background: var(--tce-success-subtle); color: var(--tce-success); }
+.tce-status--warning { background: var(--tce-warning-subtle); color: var(--tce-warning); }
+.tce-status--error { background: var(--tce-danger-subtle); color: var(--tce-danger); }
+
+.tce-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.tce-row > .tce-btn--grow {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+/* Section label */
+.tce-label {
+	margin: 0;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--tce-text-muted);
+}
+
+/* ===================================================================== */
+/* Buttons inside panels                                                 */
+/* ===================================================================== */
+
+.tce-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 32px;
+	margin: 0;
+	padding: 5px 12px;
+	border: 1px solid var(--tce-border);
+	border-radius: var(--tce-radius-sm);
+	background: var(--tce-surface);
+	color: var(--tce-text);
+	font: 600 14px/20px var(--tce-font);
+	text-align: center;
+	cursor: pointer;
+	transition: background-color 0.1s ease, border-color 0.1s ease;
+	white-space: nowrap;
+}
+
+.tce-btn svg {
+	width: 16px;
+	height: 16px;
+	flex: none;
+}
+
+.tce-btn:hover:not(:disabled) { background: var(--tce-hover); }
+.tce-btn:active:not(:disabled) { background: var(--tce-pressed); }
+
+.tce-btn--primary {
+	background: var(--tce-accent);
+	border-color: var(--tce-accent);
+	color: var(--tce-text-on-accent);
+}
+
+.tce-btn--primary:hover:not(:disabled),
+.tce-btn--primary:active:not(:disabled) {
+	background: var(--tce-accent-hover);
+	border-color: var(--tce-accent-hover);
+}
+
+.tce-btn--danger {
+	background: var(--tce-surface);
+	border-color: var(--tce-danger);
+	color: var(--tce-danger);
+}
+
+.tce-btn--danger:hover:not(:disabled) { background: var(--tce-danger-subtle); }
+
+.tce-btn--subtle {
+	background: transparent;
+	border-color: transparent;
+	color: var(--tce-accent);
+	font-weight: 400;
+}
+
+.tce-btn--small {
+	min-height: 24px;
+	padding: 2px 8px;
+	font-size: 12px;
+	line-height: 16px;
+}
+
+.tce-btn:disabled {
+	cursor: not-allowed;
+	background: var(--tce-surface-2);
+	border-color: var(--tce-border);
+	color: var(--tce-text-muted);
+	opacity: 0.7;
+}
+
+.tce-btn--subtle:disabled {
+	background: transparent;
+	border-color: transparent;
+}
+
+.tce-btn:focus-visible,
+.tce-icon-btn:focus-visible,
+.tce-disclosure__summary:focus-visible,
+.tce-segmented input:focus-visible + span {
+	outline: none;
+	box-shadow: var(--tce-focus);
+}
+
+.tce-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex: none;
+	width: 28px;
+	height: 28px;
+	margin: 0;
+	padding: 0;
+	border: none;
+	border-radius: var(--tce-radius-sm);
+	background: transparent;
+	color: var(--tce-text-muted);
+	cursor: pointer;
+}
+
+.tce-icon-btn svg {
+	width: 16px;
+	height: 16px;
+}
+
+.tce-icon-btn:hover {
+	background: var(--tce-hover);
+	color: var(--tce-text);
+}
+
+/* Segmented radio group (format picker) */
+.tce-segmented {
+	display: inline-flex;
+	margin: 0;
+	padding: 2px;
+	border: 1px solid var(--tce-border);
+	border-radius: var(--tce-radius-sm);
+	background: var(--tce-surface-2);
+}
+
+.tce-segmented label {
+	position: relative;
+	margin: 0;
+	cursor: pointer;
+}
+
+.tce-segmented input {
+	position: absolute;
+	opacity: 0;
+	width: 1px;
+	height: 1px;
 	margin: 0;
 }
 
-#batch-transcript-panel .btp-btn:disabled {
-	opacity: 0.5;
-	cursor: not-allowed;
+.tce-segmented span {
+	display: block;
+	padding: 2px 12px;
+	border-radius: 3px;
+	font-size: 13px;
+	line-height: 22px;
+	color: var(--tce-text-muted);
 }
 
-#batch-transcript-panel .btp-btn:not(:disabled):hover {
-	transform: translateY(-1px);
+.tce-segmented input:checked + span {
+	background: var(--tce-surface);
+	color: var(--tce-text);
+	font-weight: 600;
+	box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
 
-#batch-transcript-panel .btp-btn:not(:disabled):active {
-	transform: translateY(1px);
+/* ===================================================================== */
+/* Progress bar                                                          */
+/* ===================================================================== */
+
+.tce-progress {
+	position: relative;
+	height: 4px;
+	width: 100%;
+	border-radius: 2px;
+	background: var(--tce-surface-2);
+	overflow: hidden;
 }
 
-#batch-transcript-panel .btp-start {
-	background: linear-gradient(135deg, #ff9a56, #ff6b35);
-	color: #000;
+.tce-progress__fill {
+	height: 100%;
+	width: 0;
+	background: var(--tce-accent);
+	border-radius: 2px;
+	transition: width 0.25s ease;
 }
 
-#batch-transcript-panel .btp-cancel {
-	background: #ff4757;
-	color: #fff;
+.tce-progress--indeterminate .tce-progress__fill {
+	position: absolute;
+	width: 35%;
+	animation: tce-indeterminate 1.4s ease-in-out infinite;
 }
 
-#batch-transcript-panel .btp-download-all {
-	background: linear-gradient(135deg, #00ff88, #00cc6a);
-	color: #000;
+@keyframes tce-indeterminate {
+	0% { left: -35%; }
+	100% { left: 100%; }
+}
+
+/* ===================================================================== */
+/* Log (batch)                                                           */
+/* ===================================================================== */
+
+.tce-log {
+	max-height: 132px;
+	margin: 0;
+	padding: 6px 8px;
+	overflow-y: auto;
+	border: 1px solid var(--tce-border);
+	border-radius: var(--tce-radius-sm);
+	background: var(--tce-bg);
+	font: 12px/18px var(--tce-font-mono);
+	color: var(--tce-text-muted);
+	list-style: none;
+}
+
+.tce-log:empty {
+	display: none;
+}
+
+.tce-log li {
+	margin: 0;
+	padding: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.tce-log__success { color: var(--tce-success); }
+.tce-log__warn { color: var(--tce-warning); }
+.tce-log__error { color: var(--tce-danger); }
+
+/* ===================================================================== */
+/* Disclosure + code (manual merge command)                              */
+/* ===================================================================== */
+
+.tce-disclosure {
+	margin: 0;
+	font-size: 13px;
+}
+
+.tce-disclosure__summary {
+	display: list-item;
+	cursor: pointer;
+	color: var(--tce-accent);
+	border-radius: var(--tce-radius-sm);
+}
+
+.tce-disclosure__body {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.tce-code {
 	flex: 1;
+	min-width: 0;
+	padding: 6px 8px;
+	border-radius: var(--tce-radius-sm);
+	background: var(--tce-surface-2);
+	color: var(--tce-text);
+	font: 12px/16px var(--tce-font-mono);
+	overflow-wrap: anywhere;
+	user-select: all;
+}
+
+/* ===================================================================== */
+/* Toasts                                                                */
+/* ===================================================================== */
+
+.tce-toast {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	width: min(360px, calc(100vw - 24px));
+	margin: 0;
+	padding: 12px 8px 12px 12px;
+	background: var(--tce-surface);
+	color: var(--tce-text);
+	border: 1px solid var(--tce-border);
+	border-left: 4px solid var(--tce-accent);
+	border-radius: var(--tce-radius-md);
+	box-shadow: var(--tce-shadow);
+	font: 400 14px/20px var(--tce-font);
+	animation: tce-toast-in 0.15s ease-out;
+}
+
+.tce-toast--success { border-left-color: var(--tce-success); }
+.tce-toast--warning { border-left-color: var(--tce-warning); }
+.tce-toast--error { border-left-color: var(--tce-danger); }
+
+.tce-toast__icon {
+	display: inline-flex;
+	flex: none;
+	width: 20px;
+	height: 20px;
+	color: var(--tce-accent);
+}
+
+.tce-toast__icon svg { width: 20px; height: 20px; }
+.tce-toast--success .tce-toast__icon { color: var(--tce-success); }
+.tce-toast--warning .tce-toast__icon { color: var(--tce-warning); }
+.tce-toast--error .tce-toast__icon { color: var(--tce-danger); }
+
+.tce-toast__content {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+	padding-right: 4px;
+}
+
+.tce-toast__title {
+	font-weight: 600;
+}
+
+.tce-toast__message {
+	overflow-wrap: anywhere;
+}
+
+.tce-toast__close {
+	margin: -4px 0 -4px auto;
+}
+
+.tce-spinner {
+	display: inline-block;
+	width: 18px;
+	height: 18px;
+	margin: 1px;
+	border: 2px solid var(--tce-accent-subtle);
+	border-top-color: var(--tce-accent);
+	border-radius: 50%;
+	animation: tce-spin 0.8s linear infinite;
+}
+
+@keyframes tce-spin {
+	to { transform: rotate(360deg); }
+}
+
+@keyframes tce-toast-in {
+	from { opacity: 0; transform: translateY(-4px); }
+	to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.tce-toast,
+	.tce-progress__fill { animation: none; transition: none; }
+	.tce-spinner { animation-duration: 2.4s; }
+	.tce-progress--indeterminate .tce-progress__fill { animation: none; left: 0; width: 100%; opacity: 0.5; }
+}
+
+@media (forced-colors: active) {
+	.tce-panel,
+	.tce-toast,
+	.tce-menu { border: 1px solid CanvasText; }
+	.tce-progress__fill { background: Highlight; }
 }

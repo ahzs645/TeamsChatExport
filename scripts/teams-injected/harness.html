@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock Teams recap - harness</title>
+<!-- Real extension CSS, injected the way content_scripts.css would be -->
+<link rel="stylesheet" href="https://ext.test/transcriptStyles.css">
+<style>
+  /* Mock of Teams' own (host) styles. Light by default; ?theme=dark switches. */
+  body { margin: 0; font: 14px/20px "Segoe UI", sans-serif; background: #f5f5f5; color: #242424; }
+  body.mock-dark { background: #1f1f1f; color: #ffffff; }
+  .app-bar { height: 48px; display: flex; align-items: center; padding: 0 16px; background: #ebebeb; font-weight: 600; }
+  .mock-dark .app-bar { background: #0a0a0a; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 360px); gap: 16px; padding: 16px; }
+  @media (max-width: 760px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px 12px; }
+  .mock-dark .card { background: #292929; border-color: #3d3d3d; }
+  .fui-Toolbar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 4px 0; color: #424242; }
+  .mock-dark .fui-Toolbar { color: #d6d6d6; }
+  .native { min-width: 32px; height: 32px; padding: 0 8px; border: none; border-radius: 4px; background: transparent; color: inherit; font: 13px "Segoe UI", sans-serif; }
+  .menubar { display: flex; flex-wrap: wrap; align-items: center; color: #424242; border-bottom: 1px solid #e0e0e0; }
+  .mock-dark .menubar { color: #d6d6d6; border-color: #3d3d3d; }
+  [role="tablist"] { display: flex; gap: 16px; padding: 8px 0; border-bottom: 1px solid #e0e0e0; }
+  .mock-dark [role="tablist"] { border-color: #3d3d3d; }
+  [role="tab"] { background: none; border: none; color: inherit; font: inherit; padding: 4px 0; }
+  [role="tab"][aria-selected="true"] { font-weight: 600; border-bottom: 2px solid #5b5fc7; }
+  video { width: 100%; max-width: 480px; aspect-ratio: 16/9; background: #000; border-radius: 8px; display: block; }
+  .chat { margin-top: 12px; }
+  .lbl { font-size: 11px; opacity: .7; margin: 12px 0 2px; text-transform: uppercase; letter-spacing: .04em; }
+  h2 { font-size: 18px; margin: 4px 0 8px; }
+</style>
+<script>
+  // Theme: ?theme=dark gives Teams-like dark colours WITHOUT a theme class, so
+  // detectTheme() has to fall back to background luminance; ?themeclass=1 also
+  // adds Teams' "theme-dark" class.
+  const params = new URLSearchParams(location.search);
+  window.__harnessTheme = params.get('theme') || 'light';
+</script>
+<script src="boot.js"></script>
+<script src="https://ext.test/ui/tceUI.js"></script>
+<script src="https://ext.test/content.js"></script>
+</head>
+<body>
+<script>
+  if (window.__harnessTheme === 'dark') document.body.classList.add('mock-dark');
+  if (params.get('themeclass')) document.body.classList.add(window.__harnessTheme === 'dark' ? 'theme-dark' : 'theme-default');
+</script>
+<div class="app-bar">Microsoft Teams (mock)</div>
+<main>
+  <section>
+    <h2>週次デザインレビュー: Product/Design</h2>
+    <video id="player" muted playsinline></video>
+    <div class="lbl">Recap action toolbar (native buttons, then injected .tce-toolbar-btn)</div>
+    <div class="card"><div class="fui-Toolbar" role="toolbar" aria-label="Recap actions">
+      <button class="native" aria-label="Audio recap">Audio recap</button>
+      <button class="native">Share</button>
+    </div></div>
+    <div class="lbl">teams.cloud.microsoft recap tabs (injected .tce-recap-bar below)</div>
+    <div class="card"><div><div role="tablist">
+      <button role="tab">Notes</button><button role="tab">AI summary</button><button role="tab" aria-selected="true">Transcript</button>
+    </div></div></div>
+  </section>
+  <aside class="card">
+    <div class="lbl">Transcript actions menubar (native, then injected .tce-cmd-btn)</div>
+    <div class="menubar" role="menubar" aria-label="Transcript actions">
+      <button class="native">Search</button>
+    </div>
+    <div class="chat" data-tid="message-pane-list-container">
+      <div data-tid="chat-pane-message" data-mid="1"><span id="author-1">Dana Whitfield</span> <time datetime="2026-10-07T09:01:00Z">9:01</time><div id="content-1">Morning all!</div></div>
+      <div data-tid="chat-pane-message" data-mid="2"><span id="author-2">Priya Raman</span> <time datetime="2026-10-07T09:02:00Z">9:02</time><div id="content-2">Looks great.</div></div>
+      <div data-tid="chat-pane-message" data-mid="3"><span id="author-3">Alex Chen</span> <time datetime="2026-10-07T09:03:00Z">9:03</time><div id="content-3">Two steps.</div></div>
+    </div>
+  </aside>
+</main>
+<!-- Data the page-world scripts would normally expose -->
+<div id="transcript-api-data" style="display:none" data-transcript-api='{"k1":{"resources":{}}}' data-updated="1"></div>
+<div id="teams-chat-exporter-transcript-data" style="display:none" data-vtt="WEBVTT&#10;&#10;1&#10;00:00:00.000 --> 00:00:02.000&#10;&lt;v 田中&gt;こんにちは&lt;/v&gt;" data-txt="[00:00:00] 田中: こんにちは"></div>
+<script>
+  // Give the mock player a realistic duration (no media file needed).
+  Object.defineProperty(document.getElementById('player'), 'duration', { get: () => 1930 });
+</script>
+</body>
+</html>

@@ -36,6 +36,13 @@ const isTeamsPage = () => {
     (document.head || document.documentElement).appendChild(script);
   };
 
+  // Shared panel/toast helpers for page-world scripts (coordinator, manifestDownload).
+  // The same file is also loaded in this isolated world via the manifest.
+  if (!window.__tceUIInjected) {
+    window.__tceUIInjected = true;
+    injectScript('ui/tceUI.js', 'UI helpers');
+  }
+
   // Inject fetch override first (captures tokens)
   if (!window.__teamsChatOverrideInjectedEarly) {
     window.__teamsChatOverrideInjectedEarly = true;
@@ -105,6 +112,16 @@ const isTeamsPage = () => {
   const { TeamsVariantDetector } = teamsModule;
   const { ExtractionEngine } = extractionModule;
 
+  // Shared injected UI (panels, toasts, menu). Normally loaded by the manifest
+  // before this script; import it as a fallback (it is a classic IIFE that
+  // assigns globalThis.__tceUI, which also works when imported as a module).
+  if (!globalThis.__tceUI) {
+    try { await import(chrome.runtime.getURL('ui/tceUI.js')); } catch (e) {
+      console.error('[Teams Chat Extractor] Failed to load UI helpers:', e);
+    }
+  }
+  const UI = globalThis.__tceUI;
+
   console.log('Teams Chat Extractor initialized');
 
   const extractionEngine = new ExtractionEngine();
@@ -156,6 +173,68 @@ const isTeamsPage = () => {
   let crossFrameAPIMeta = {};
   let crossFrameTokens = {};
 
+  // === FRAME GATING ===
+  // content.js runs in every frame (all_frames: true) and the popup messages
+  // the whole tab (tabs.sendMessage without a frameId), so every frame gets
+  // every message. Actions that create UI must run in exactly one frame:
+  //   1. a frame that actually hosts the relevant element (player <video>,
+  //      recap meeting picker, chat message list) handles it immediately and
+  //      posts a claim to the top frame;
+  //   2. otherwise the top frame handles it after a short grace period,
+  //      unless a claim arrived meanwhile;
+  //   3. every other frame ignores it (returns false so it doesn't hold the
+  //      response channel open).
+  // "Top frame only" would be wrong for Stream-in-Teams, where the player
+  // lives in a SharePoint iframe; "every frame" produced duplicate panels.
+  const IS_TOP_FRAME = (() => { try { return window.top === window; } catch (e) { return false; } })();
+  const CLAIM_GRACE_MS = 400;
+  const recentClaims = {};
+  if (IS_TOP_FRAME) {
+    window.addEventListener('message', (e) => {
+      const d = e.data;
+      if (d && d.__tceFrameClaim === true && typeof d.action === 'string') {
+        recentClaims[d.action] = Date.now();
+      }
+    });
+  }
+  const announceClaim = (action) => {
+    if (IS_TOP_FRAME) { recentClaims[action] = Date.now(); return; }
+    try { window.top.postMessage({ __tceFrameClaim: true, action }, '*'); } catch (e) {}
+  };
+  // A real player, not a thumbnail/preview: rendered at a usable size.
+  const hasPlayerVideo = () => Array.from(document.querySelectorAll('video'))
+    .some((v) => v.offsetWidth * v.offsetHeight >= 160 * 90);
+  const FRAME_RELEVANCE = {
+    downloadVideo: () => hasPlayerVideo(),
+    startBatchTranscript: () => !!document.querySelector(
+      '[data-testid="intelligent-recap-instance-select-dropdown"], [aria-label="Transcript actions"], [aria-label="Audio recap"]'
+    ),
+    extractActiveChat: () => !!document.querySelector(
+      '[data-tid="message-pane-list-container"], [data-tid="chat-pane-message"], #message-list'
+    )
+  };
+  /**
+   * Run `handler` in exactly one frame of the tab (rules above).
+   * Returns true if this frame took (or may take) the action.
+   */
+  const runInOneFrame = (action, handler) => {
+    let relevant = false;
+    try { relevant = !!FRAME_RELEVANCE[action]?.(); } catch (e) {}
+    if (relevant) {
+      announceClaim(action);
+      handler();
+      return true;
+    }
+    if (!IS_TOP_FRAME) return false;
+    const receivedAt = Date.now();
+    setTimeout(() => {
+      // A frame that claimed this action within ~1s of us receiving it wins.
+      if ((recentClaims[action] || 0) > receivedAt - 1000) return;
+      handler();
+    }, CLAIM_GRACE_MS);
+    return true;
+  };
+
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.action) {
@@ -174,6 +253,9 @@ const isTeamsPage = () => {
         return true;
 
       case 'getState':
+        // Sub-frames (e.g. a Stream player iframe) only answer if they host a
+        // chat, so their <h2> video title can't win the race against the top frame.
+        if (!IS_TOP_FRAME && !FRAME_RELEVANCE.extractActiveChat()) return false;
         // Try multiple methods to get the chat name
         let currentChatName = null;
 
@@ -232,26 +314,12 @@ const isTeamsPage = () => {
         return true;
 
       case 'extractActiveChat':
-        (async () => {
-          try {
-            const result = await extractionEngine.extractActiveChat();
-            if (result) {
-              const response = await chrome.runtime.sendMessage({
-                action: 'openResults',
-                data: result
-              });
-              if (response && response.success) {
-                console.log('Results page opened successfully');
-              }
-            } else {
-              console.log('No messages extracted');
-            }
-          } catch (error) {
-            console.error('Error extracting active chat:', error);
-          }
-        })();
-        sendResponse({status: 'extracting'});
-        return true;
+        // Progress is shown in-page (toast) and broadcast to the extension as
+        // { action: 'extractionProgress', status, count, message }.
+        return runInOneFrame('extractActiveChat', () => {
+          runChatExtraction();
+          sendResponse({ status: 'extracting' });
+        });
 
       case 'getCurrentChat':
         const currentChat = TeamsVariantDetector.getCurrentChatTitle();
@@ -259,13 +327,14 @@ const isTeamsPage = () => {
         return true;
 
       case 'startBatchTranscript':
-        setupBatchTranscriptPanel();
-        sendResponse({ status: 'panel_opened' });
-        return true;
+        return runInOneFrame('startBatchTranscript', () => {
+          setupBatchTranscriptPanel();
+          sendResponse({ status: 'panel_opened' });
+        });
 
       case 'downloadVideo':
-        // Write command to a hidden div, coordinator picks it up
-        (() => {
+        // Write command to a hidden div, coordinator (page world) picks it up
+        return runInOneFrame('downloadVideo', () => {
           const method = request.data?.method || '';
           let cmdDiv = document.getElementById('tce-video-cmd');
           if (!cmdDiv) {
@@ -278,8 +347,7 @@ const isTeamsPage = () => {
           cmdDiv.setAttribute('data-method', method);
           cmdDiv.setAttribute('data-timestamp', Date.now().toString());
           sendResponse({ status: 'download_started' });
-        })();
-        return true;
+        });
 
       case 'getVideoModules':
         // Check available modules by reading hidden divs from page world
@@ -321,11 +389,18 @@ const isTeamsPage = () => {
         return true;
 
       case 'stopVideoDownload':
+        // Inline <script> injection is blocked by the page CSP; use the same
+        // hidden command div the coordinator already polls.
         (() => {
-          const script = document.createElement('script');
-          script.textContent = `window.__videoDownloadCoordinator?.stop();`;
-          document.head.appendChild(script);
-          script.remove();
+          let cmdDiv = document.getElementById('tce-video-cmd');
+          if (!cmdDiv) {
+            cmdDiv = document.createElement('div');
+            cmdDiv.id = 'tce-video-cmd';
+            cmdDiv.style.display = 'none';
+            document.body.appendChild(cmdDiv);
+          }
+          cmdDiv.setAttribute('data-command', 'stop');
+          cmdDiv.setAttribute('data-timestamp', Date.now().toString());
           sendResponse({ stopped: true });
         })();
         return true;
@@ -342,50 +417,71 @@ const isTeamsPage = () => {
         })();
         return true;
 
-      case 'getTranscriptStatus':
-        // Check if transcript data is available
-        const transcriptContainer = document.getElementById('teams-chat-exporter-transcript-data');
-        const hasTranscript = transcriptContainer && (transcriptContainer.textContent || transcriptContainer.getAttribute('data-vtt'));
+      case 'getTranscriptStatus': {
+        // `available` now means "extractTranscript would succeed": true if the
+        // API path is usable (metadata + fresh token, local or cross-frame) or
+        // DOM/captured transcript data exists. Extra fields: source
+        // ('api' | 'captured' | 'dom' | null), apiAvailable, domAvailable.
+        // Frames with data answer at once; frames with a player answer after a
+        // short delay; the top frame answers last, so the most useful frame's
+        // answer reaches the popup first.
         const hasVideo = !!document.querySelector('video');
-        sendResponse({
-          available: !!hasTranscript,
-          hasVideo: hasVideo,
-          isVideoPage: isVideoPage()
+        const onVideoPage = isVideoPage();
+        const build = (r) => ({
+          available: r.ready,
+          hasVideo,
+          isVideoPage: onVideoPage,
+          source: r.source,
+          apiAvailable: r.api,
+          domAvailable: r.dom
+        });
+        const local = getLocalTranscriptReadiness();
+        if (local.ready) {
+          sendResponse(build(local));
+          return false;
+        }
+        if (!hasVideo && !onVideoPage && !IS_TOP_FRAME) return false;
+        getBackgroundTranscriptReadiness().then((bg) => {
+          const r = bg.ready ? bg : local;
+          if (r.ready) sendResponse(build(r));
+          else setTimeout(() => sendResponse(build(r)), (hasVideo || onVideoPage) ? 150 : 400);
         });
         return true;
+      }
 
-      case 'extractTranscript':
-        // Extract transcript via API first, then DOM fallback
+      case 'extractTranscript': {
+        // Extract transcript via API first, then DOM fallback. A frame that
+        // finds nothing answers late, so a frame that has the transcript wins.
+        const relevantFrame = IS_TOP_FRAME || isVideoPage() || !!document.querySelector('video') ||
+          !!document.getElementById('teams-chat-exporter-transcript-data');
+        if (!relevantFrame) return false;
+        const failLater = (payload) => setTimeout(() => sendResponse(payload), IS_TOP_FRAME ? 1500 : 2500);
         (async () => {
           try {
             const data = await getTranscriptData();
             if (!data) {
-              sendResponse({
+              failLater({
                 success: false,
                 error: 'Transcript not ready. Start playback to load the transcript.'
               });
               return;
             }
-
-            const titleEl = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
-            const videoTitle = titleEl?.innerText?.trim() || document.title?.trim() || 'transcript';
-            const safeTitle = videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
-
             sendResponse({
               success: true,
               vtt: data.vtt,
               txt: data.txt,
-              title: safeTitle,
+              title: getVideoTitle(),
               source: data.source || 'unknown'
             });
           } catch (err) {
-            sendResponse({
+            failLater({
               success: false,
               error: 'Failed to extract transcript: ' + err.message
             });
           }
         })();
         return true;
+      }
 
       default:
         sendResponse({status: 'unknown action'});
@@ -397,21 +493,16 @@ const isTeamsPage = () => {
 
   // === NATIVE TOOLBAR INTEGRATION ===
 
-  // SVG icon paths (20x20 viewBox, clean outline style)
-  const SVG_ICONS = {
-    copy: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="6" y="6" width="10" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 14V4.5A1.5 1.5 0 0 1 5.5 3H12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-    download: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-    batch: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="5" width="10" height="12" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M7 3h7.5A1.5 1.5 0 0 1 16 4.5V14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M7 10h4M7 13h2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
-    video: '<svg viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="11" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M13 9l5-3v8l-5-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>',
-    chevron: '<svg viewBox="0 0 8 5" xmlns="http://www.w3.org/2000/svg" style="width:8px;height:5px;margin-left:2px"><path d="M1 1l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-  };
+  // Outline icons (20x20, stroke = currentColor) shared with the panels.
+  const ICONS = UI.ICONS;
 
-  // Shared helpers for transcript actions
+  // Title of the current recording, safe to use in a filename (keeps
+  // non-ASCII characters; only strips characters illegal in filenames).
   const getVideoTitle = () => {
     const heading = document.querySelector('h1[class*="videoTitleViewModeHeading"] label');
     const h2 = document.querySelector('h2');
-    const videoTitle = heading?.innerText?.trim() || h2?.innerText?.trim() || document.title?.trim() || 'transcript';
-    return videoTitle.replace(/[^a-zA-Z0-9\s-]/g, '').trim();
+    const videoTitle = heading?.innerText?.trim() || h2?.innerText?.trim() || document.title?.trim() || '';
+    return UI.sanitizeFilename(videoTitle, 'transcript');
   };
 
   // === API-based transcript fetch (same approach as batch downloader) ===
@@ -681,94 +772,164 @@ const isTeamsPage = () => {
     };
   };
 
-  const downloadFile = (content, filename) => {
+  // === TRANSCRIPT READINESS ===
+  // Mirrors what getTranscriptData() can actually use, so the popup's
+  // "Transcript ready" matches what extraction will do.
+
+  const latestEntry = (map) => {
+    const keys = Object.keys(map || {});
+    return keys.length ? map[keys[keys.length - 1]] : null;
+  };
+
+  // Same resource selection as fetchTranscriptViaAPI.
+  const apiReadyFor = (apiMeta) => {
+    if (!apiMeta || !apiMeta.resources) return false;
+    const res = apiMeta.resources['TranscriptV2'] ||
+      apiMeta.resources['transcriptV2'] ||
+      Object.values(apiMeta.resources).find((r) => r.location && r.location.includes('transcript'));
+    return !!(res && res.location && getTokenForUrl(res.location));
+  };
+
+  const hasDomTranscript = () => {
+    const container = document.getElementById('teams-chat-exporter-transcript-data');
+    if (container && (container.textContent || container.getAttribute('data-vtt'))) return true;
+    const captured = latestEntry(getCapturedTranscriptContent());
+    return !!(captured && captured.rawVtt);
+  };
+
+  const getLocalTranscriptReadiness = () => {
+    const api = apiReadyFor(latestEntry(getAPIMetadata())) || apiReadyFor(latestEntry(crossFrameAPIMeta));
+    const dom = hasDomTranscript();
+    return { ready: api || dom, api, dom, source: api ? 'api' : (dom ? 'dom' : null) };
+  };
+
+  const getBackgroundTranscriptReadiness = () => new Promise((resolve) => {
+    const none = { ready: false, api: false, dom: false, source: null };
+    try {
+      chrome.runtime.sendMessage({ action: 'getTranscriptAPIMeta' }, (resp) => {
+        if (chrome.runtime.lastError || !resp || !resp.metadata) { resolve(none); return; }
+        const api = apiReadyFor(latestEntry(resp.metadata));
+        resolve(api ? { ready: true, api: true, dom: false, source: 'api' } : none);
+      });
+    } catch (e) {
+      resolve(none);
+    }
+  });
+
+  // === SAVING / FEEDBACK HELPERS ===
+
+  const saveBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content));
-    a.setAttribute('download', filename);
+    a.href = url;
+    a.download = filename;
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+
+  const downloadFile = (content, filename) => {
+    saveBlob(new Blob([content], { type: 'text/plain;charset=utf-8' }), filename);
+  };
+
+  const NOT_READY_MESSAGE = 'Transcript not ready yet. Start playback (or open the Transcript tab) so it loads, then try again.';
+
+  // Fetch transcript data; show a progress toast if it takes a moment and an
+  // error toast if nothing is available.
+  const getTranscriptWithFeedback = async () => {
+    let busy = null;
+    const timer = setTimeout(() => {
+      busy = UI.toast({ kind: 'progress', message: 'Fetching transcript…' });
+    }, 400);
+    try {
+      const data = await getTranscriptData();
+      if (!data) UI.toast({ kind: 'error', title: 'Transcript not available', message: NOT_READY_MESSAGE });
+      return data;
+    } catch (err) {
+      UI.toast({ kind: 'error', title: 'Transcript not available', message: err.message || String(err) });
+      return null;
+    } finally {
+      clearTimeout(timer);
+      if (busy) busy.close();
+    }
+  };
+
+  // Brief "copied" state on a toolbar/command button (icon swaps to a check).
+  const flashCopied = (btn) => {
+    if (!btn || btn.classList.contains('tce-copied')) return;
+    const origHTML = btn.innerHTML;
+    btn.classList.add('tce-copied');
+    const svg = btn.querySelector('svg');
+    if (svg) svg.outerHTML = ICONS.check;
+    const label = btn.querySelector('.tce-label-text');
+    if (label) label.textContent = 'Copied';
+    setTimeout(() => {
+      btn.classList.remove('tce-copied');
+      btn.innerHTML = origHTML;
+    }, 1500);
   };
 
   // Copy transcript handler
   const handleCopy = async (btn) => {
-    const data = await getTranscriptData();
-    if (!data) {
-      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(data.vtt);
-      btn.classList.add('tce-copied');
-      const origHTML = btn.innerHTML;
-      if (btn.classList.contains('tce-cmd-btn')) {
-        btn.textContent = 'Copied!';
-      }
-      setTimeout(() => {
-        btn.classList.remove('tce-copied');
-        if (btn.classList.contains('tce-cmd-btn')) {
-          btn.innerHTML = origHTML;
-        }
-      }, 1500);
-    } catch (err) {
-      console.error('[Teams Chat Extractor] Failed to copy:', err);
+    const data = await getTranscriptWithFeedback();
+    if (!data) return;
+    const ok = await UI.copyText(data.vtt);
+    if (ok) {
+      flashCopied(btn);
+      UI.toast({ kind: 'success', message: 'Transcript copied to clipboard.' });
+    } else {
+      console.error('[Teams Chat Extractor] Failed to copy transcript to clipboard');
+      UI.toast({
+        kind: 'error',
+        title: 'Couldn’t copy transcript',
+        message: 'The browser blocked clipboard access. Click on the page so it has focus, then try again, or use Download instead.'
+      });
     }
   };
 
-  // Download VTT handler
-  const handleDownloadVTT = async () => {
-    const data = await getTranscriptData();
-    if (!data) {
-      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-      return;
-    }
-    downloadFile(data.vtt, `transcript-${getVideoTitle()}.vtt`);
+  // Download VTT / TXT handlers
+  const handleDownload = async (format) => {
+    const data = await getTranscriptWithFeedback();
+    if (!data) return;
+    const filename = `transcript-${getVideoTitle()}.${format}`;
+    downloadFile(format === 'txt' ? data.txt : data.vtt, filename);
+    UI.toast({ kind: 'success', message: `Saved ${filename}` });
+  };
+  const handleDownloadVTT = () => handleDownload('vtt');
+  const handleDownloadTXT = () => handleDownload('txt');
+
+  const downloadMenuItems = () => ([
+    { label: 'Download VTT', icon: 'download', onSelect: handleDownloadVTT },
+    { label: 'Download TXT', icon: 'download', onSelect: handleDownloadTXT }
+  ]);
+
+  // Icon-only button for Teams' recap toolbar: inherits the toolbar's colour.
+  const makeToolbarBtn = (icon, label, handler) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tce-toolbar-btn';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    btn.innerHTML = icon;
+    if (handler) btn.addEventListener('click', handler);
+    return btn;
   };
 
-  // Download TXT handler
-  const handleDownloadTXT = async () => {
-    const data = await getTranscriptData();
-    if (!data) {
-      alert('Transcript not ready yet. Start playback to load the transcript, then try again.');
-      return;
-    }
-    downloadFile(data.txt, `transcript-${getVideoTitle()}.txt`);
-  };
-
-  // Close any open download dropdown
-  const closeDropdowns = () => {
-    document.querySelectorAll('.tce-download-dropdown').forEach(d => d.remove());
-  };
-
-  // Create download dropdown anchored to a button
-  const createDownloadDropdown = (anchorBtn) => {
-    closeDropdowns();
-    const dropdown = document.createElement('div');
-    dropdown.className = 'tce-download-dropdown';
-
-    const vttItem = document.createElement('button');
-    vttItem.className = 'tce-download-dropdown-item';
-    vttItem.textContent = 'Download VTT';
-    vttItem.addEventListener('click', () => { handleDownloadVTT(); closeDropdowns(); });
-
-    const txtItem = document.createElement('button');
-    txtItem.className = 'tce-download-dropdown-item';
-    txtItem.textContent = 'Download TXT';
-    txtItem.addEventListener('click', () => { handleDownloadTXT(); closeDropdowns(); });
-
-    dropdown.appendChild(vttItem);
-    dropdown.appendChild(txtItem);
-    anchorBtn.appendChild(dropdown);
-
-    // Close on outside click
-    const outsideHandler = (e) => {
-      if (!anchorBtn.contains(e.target)) {
-        closeDropdowns();
-        document.removeEventListener('click', outsideHandler, true);
-      }
-    };
-    setTimeout(() => document.addEventListener('click', outsideHandler, true), 0);
+  // Labelled command button (transcript actions menubar, recap bar).
+  const makeCmdBtn = (label, icon, handler, ariaLabel) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'tce-cmd-btn';
+    btn.innerHTML = icon;
+    const span = document.createElement('span');
+    span.className = 'tce-label-text';
+    span.textContent = label;
+    btn.appendChild(span);
+    if (ariaLabel) btn.setAttribute('aria-label', ariaLabel);
+    if (handler) btn.addEventListener('click', handler);
+    return btn;
   };
 
   // === LOCATION 1: Recap Action Toolbar ===
@@ -779,27 +940,11 @@ const isTeamsPage = () => {
     if (!toolbar || toolbar.hasAttribute('data-tce-injected')) return;
     toolbar.setAttribute('data-tce-injected', 'true');
 
-    // Create icon buttons
-    const makeBtn = (icon, title, handler) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'tce-toolbar-btn';
-      btn.title = title;
-      btn.innerHTML = icon;
-      btn.addEventListener('click', handler);
-      return btn;
-    };
-
-    const copyBtn = makeBtn(SVG_ICONS.copy, 'Copy transcript', (e) => handleCopy(e.currentTarget));
-
-    const downloadBtn = makeBtn(SVG_ICONS.download + SVG_ICONS.chevron, 'Download transcript', (e) => {
-      e.stopPropagation();
-      createDownloadDropdown(e.currentTarget);
-    });
-
-    const batchBtn = makeBtn(SVG_ICONS.batch, 'Batch download all transcripts', () => setupBatchTranscriptPanel());
-
-    const videoBtn = makeBtn(SVG_ICONS.video, 'Download video', () => handleDirectVideoDownload());
+    const copyBtn = makeToolbarBtn(ICONS.copy, 'Copy transcript', (e) => handleCopy(e.currentTarget));
+    const downloadBtn = makeToolbarBtn(ICONS.download + ICONS.chevron, 'Download transcript');
+    UI.bindMenuButton(downloadBtn, downloadMenuItems, { label: 'Download transcript' });
+    const batchBtn = makeToolbarBtn(ICONS.batch, 'Batch download all transcripts', () => setupBatchTranscriptPanel());
+    const videoBtn = makeToolbarBtn(ICONS.video, 'Download video', () => handleDirectVideoDownload());
 
     toolbar.appendChild(copyBtn);
     toolbar.appendChild(downloadBtn);
@@ -818,33 +963,24 @@ const isTeamsPage = () => {
     // Add a separator first
     const sep = document.createElement('span');
     sep.className = 'tce-cmd-separator';
+    sep.setAttribute('role', 'separator');
     menubar.appendChild(sep);
 
-    const makeCmdBtn = (label, icon, handler) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'tce-cmd-btn';
-      btn.innerHTML = icon + ' ' + label;
-      btn.addEventListener('click', handler);
-      return btn;
-    };
-
-    menubar.appendChild(makeCmdBtn('Copy', SVG_ICONS.copy, (e) => handleCopy(e.currentTarget)));
-    menubar.appendChild(makeCmdBtn('Download VTT', SVG_ICONS.download, handleDownloadVTT));
-    menubar.appendChild(makeCmdBtn('Download TXT', SVG_ICONS.download, handleDownloadTXT));
-    menubar.appendChild(makeCmdBtn('Batch Download', SVG_ICONS.batch, () => setupBatchTranscriptPanel()));
+    menubar.appendChild(makeCmdBtn('Copy', ICONS.copy, (e) => handleCopy(e.currentTarget), 'Copy transcript'));
+    menubar.appendChild(makeCmdBtn('Download VTT', ICONS.download, handleDownloadVTT));
+    menubar.appendChild(makeCmdBtn('Download TXT', ICONS.download, handleDownloadTXT));
+    menubar.appendChild(makeCmdBtn('Batch Download', ICONS.batch, () => setupBatchTranscriptPanel(), 'Batch download all transcripts'));
 
     console.log('[Teams Chat Extractor] Injected buttons into transcript actions menubar');
   };
 
-  // Try injecting into both toolbar locations
   // === LOCATION 3: Teams Recap Page (teams.cloud.microsoft) ===
   const injectTeamsRecapButtons = () => {
     // Only on teams.cloud.microsoft
     if (!window.location.hostname.includes('teams.cloud.microsoft')) return;
 
     // Don't inject twice
-    if (document.querySelector('.tce-teams-recap-bar')) return;
+    if (document.querySelector('.tce-recap-bar')) return;
 
     // Check if we have API metadata (means we're on a recap page)
     // Note: __transcriptAPIData is in the page world, not content script world.
@@ -872,51 +1008,16 @@ const isTeamsPage = () => {
     const recapPanel = targetTablist.parentElement;
     if (!recapPanel) return;
 
-    // Create a compact toolbar
+    // Compact toolbar using the same command-button style as the other locations
     const bar = document.createElement('div');
-    bar.className = 'tce-teams-recap-bar';
-    bar.style.cssText = 'display:flex;gap:4px;padding:4px 8px;align-items:center;justify-content:flex-end;';
+    bar.className = 'tce-recap-bar';
+    bar.setAttribute('role', 'toolbar');
+    bar.setAttribute('aria-label', 'Teams Chat Exporter');
 
-    const makeBtn = (text, handler) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'tce-cmd-btn';
-      btn.textContent = text;
-      btn.style.cssText = 'font-size:11px;padding:2px 8px;border:1px solid #bbb;border-radius:3px;background:#fff;cursor:pointer;color:#444;';
-      btn.addEventListener('click', handler);
-      btn.addEventListener('mouseenter', () => { btn.style.background = '#e0e0e0'; });
-      btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
-      return btn;
-    };
-
-    const copyBtn = makeBtn('\u{1F4CB} Copy', async () => {
-      const data = await getTranscriptData();
-      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
-      await navigator.clipboard.writeText(data.vtt);
-      copyBtn.textContent = 'Copied!';
-      setTimeout(() => { copyBtn.textContent = '\u{1F4CB} Copy'; }, 1500);
-    });
-
-    const dlVttBtn = makeBtn('\u2B07 VTT', async () => {
-      const data = await getTranscriptData();
-      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
-      const title = document.querySelector('h1,h2')?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '') || 'transcript';
-      downloadFile(data.vtt, `transcript-${title}.vtt`);
-    });
-
-    const dlTxtBtn = makeBtn('\u2B07 TXT', async () => {
-      const data = await getTranscriptData();
-      if (!data) { alert('Transcript not available. Open the Transcript tab first.'); return; }
-      const title = document.querySelector('h1,h2')?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '') || 'transcript';
-      downloadFile(data.txt, `transcript-${title}.txt`);
-    });
-
-    const dlVideoBtn = makeBtn('\u{1F3AC} Video', () => handleDirectVideoDownload());
-
-    bar.appendChild(copyBtn);
-    bar.appendChild(dlVttBtn);
-    bar.appendChild(dlTxtBtn);
-    bar.appendChild(dlVideoBtn);
+    bar.appendChild(makeCmdBtn('Copy', ICONS.copy, (e) => handleCopy(e.currentTarget), 'Copy transcript'));
+    bar.appendChild(makeCmdBtn('VTT', ICONS.download, handleDownloadVTT, 'Download transcript as VTT'));
+    bar.appendChild(makeCmdBtn('TXT', ICONS.download, handleDownloadTXT, 'Download transcript as TXT'));
+    bar.appendChild(makeCmdBtn('Video', ICONS.video, () => handleDirectVideoDownload(), 'Download video'));
 
     // Insert after the tablist's parent container (below the tabs, inside the scrollable area)
     targetTablist.parentElement.insertAdjacentElement('afterend', bar);
@@ -929,14 +1030,117 @@ const isTeamsPage = () => {
     injectTeamsRecapButtons();
   };
 
+  // === CHAT EXTRACTION (popup "Extract This Chat") ===
+
+  const broadcastExtraction = (detail) => {
+    try {
+      chrome.runtime.sendMessage({ action: 'extractionProgress', ...detail }, () => {
+        if (chrome.runtime.lastError) { /* popup closed: ignore */ }
+      });
+    } catch (e) {}
+  };
+
+  let chatExtractionRunning = false;
+
+  /**
+   * Runs extractionEngine.extractActiveChat() with in-page feedback. Progress
+   * comes from wrapping the engine's per-page / per-stage methods on this
+   * instance only (the modules themselves are unchanged).
+   */
+  const runChatExtraction = async () => {
+    if (chatExtractionRunning) return;
+    chatExtractionRunning = true;
+
+    const progress = UI.toast({ kind: 'progress', title: 'Extracting chat', message: 'Looking for messages…' });
+    broadcastExtraction({ status: 'started', count: 0, message: 'Looking for messages…' });
+
+    let count = 0;
+    const report = (message) => {
+      progress.update({ message });
+      broadcastExtraction({ status: 'progress', count, message });
+    };
+
+    const restores = [];
+    const wrap = (obj, name, makeWrapper) => {
+      if (!obj || typeof obj[name] !== 'function') return;
+      const own = Object.prototype.hasOwnProperty.call(obj, name);
+      const orig = obj[name];
+      obj[name] = makeWrapper(orig);
+      restores.push(() => { if (own) obj[name] = orig; else delete obj[name]; });
+    };
+
+    const api = extractionEngine.apiMessageExtractor;
+    wrap(api, 'extractFromPayload', (orig) => function (...args) {
+      const result = orig.apply(this, args);
+      if (Array.isArray(result) && result.length) {
+        count += result.length;
+        report(`Extracting chat… ${count.toLocaleString()} messages`);
+      }
+      return result;
+    });
+    wrap(extractionEngine, 'scrollToLoadMessages', (orig) => function (...args) {
+      report('Scrolling to load older messages…');
+      return orig.apply(this, args);
+    });
+    wrap(extractionEngine, 'extractMessagesFromDOM', (orig) => function (...args) {
+      const result = orig.apply(this, args);
+      if (Array.isArray(result)) {
+        count = result.length;
+        report(`Extracting chat… ${count.toLocaleString()} messages`);
+      }
+      return result;
+    });
+    wrap(extractionEngine, 'embedAvatars', (orig) => function (messages, ...rest) {
+      report(`Preparing ${(messages?.length || count).toLocaleString()} messages…`);
+      return orig.call(this, messages, ...rest);
+    });
+
+    try {
+      const result = await extractionEngine.extractActiveChat();
+      restores.forEach((fn) => fn());
+      restores.length = 0;
+      if (!result) {
+        progress.update({
+          kind: 'warning',
+          title: 'No messages found',
+          message: 'Open a chat and let it load, then try again.',
+          timeout: 0
+        });
+        broadcastExtraction({ status: 'empty', count: 0, message: 'No messages found' });
+        return;
+      }
+      const total = Object.values(result).reduce((n, msgs) => n + (Array.isArray(msgs) ? msgs.length : 0), 0);
+      const response = await chrome.runtime.sendMessage({ action: 'openResults', data: result });
+      if (response && response.success === false) {
+        throw new Error(response.error || 'The viewer could not be opened.');
+      }
+      progress.update({
+        kind: 'success',
+        title: 'Chat extracted',
+        message: `Opened ${total.toLocaleString()} messages in the viewer.`
+      });
+      broadcastExtraction({ status: 'done', count: total, message: 'Opened in viewer' });
+    } catch (error) {
+      console.error('Error extracting active chat:', error);
+      progress.update({
+        kind: 'error',
+        title: 'Chat extraction failed',
+        message: error?.message || String(error)
+      });
+      broadcastExtraction({ status: 'error', count, message: error?.message || String(error) });
+    } finally {
+      restores.forEach((fn) => fn());
+      chatExtractionRunning = false;
+    }
+  };
+
   // === VIDEO DOWNLOAD PANEL ===
-  let videoDownloadPanelOpen = false;
   let videoCaptureAvailable = false;
 
   // Helper to send commands to the injected video capture script
   const sendVideoCommand = (command, data = {}, timeoutMs = 2000) => {
     // Use longer timeout for download operations
-    if (command === 'downloadFiles' || command === 'directDownload') {
+    if (command === 'downloadFiles' || command === 'directDownload' || command === 'downloadCombined') {
       timeoutMs = 300000; // 5 minutes for downloads
     }
 
@@ -992,6 +1196,16 @@ const isTeamsPage = () => {
     console.log('[Teams Chat Extractor] Video capture ready');
   });
 
+  // Developer aid (formerly a button in the panel): logs captured segment URL
+  // patterns. Run from the page console:
+  //   document.dispatchEvent(new CustomEvent('teamsVideoCommand', {detail: {command: 'analyzeUrls'}}))
+  // or from the extension's content-script console: __tceAnalyzeVideoUrls()
+  globalThis.__tceAnalyzeVideoUrls = async () => {
+    const result = await sendVideoCommand('analyzeUrls');
+    console.log('[URL Analysis]', result);
+    return result;
+  };
+
   // === DIRECT VIDEO DOWNLOAD (preferred, uses SharePoint API) ===
   const getVideoDriveItem = () => {
     // Read from hidden div (populated by transcriptAPIFetcher.js in page world)
@@ -1004,6 +1218,8 @@ const isTeamsPage = () => {
     return null;
   };
 
+  const DIRECT_DOWNLOAD_TOAST = 'The original file is downloading in a new tab.';
+
   const handleDirectVideoDownload = async () => {
     // Tier 1: Use pre-authenticated download URL if already captured by page-world script
     const driveItem = getVideoDriveItem();
@@ -1012,6 +1228,7 @@ const isTeamsPage = () => {
       const sizeMB = driveItem.fileSize ? Math.round(driveItem.fileSize / 1024 / 1024) : '?';
       console.log(`[Teams Chat Extractor] Direct video download: ${filename} (${sizeMB}MB)`);
       window.open(driveItem.downloadUrl, '_blank');
+      UI.toast({ kind: 'success', title: 'Video download started', message: DIRECT_DOWNLOAD_TOAST });
       return;
     }
 
@@ -1024,11 +1241,13 @@ const isTeamsPage = () => {
       const downloadUrl = `https://${window.location.hostname}${siteBase}/_layouts/15/download.aspx?SourceUrl=${encodeURIComponent(filePath)}`;
       console.log('[Teams Chat Extractor] Video download via download.aspx');
       window.open(downloadUrl, '_blank');
+      UI.toast({ kind: 'success', title: 'Video download started', message: DIRECT_DOWNLOAD_TOAST });
       return;
     }
 
     // Tier 3: Discover drive item from performance entries, then fetch download URL
     if (driveItem && driveItem.apiBase) {
+      const busy = UI.toast({ kind: 'progress', message: 'Looking up the video download link…' });
       // Ask page world to fetch the download URL via CustomEvent
       document.dispatchEvent(new CustomEvent('tceRequestVideoDownloadUrl', {
         detail: { apiBase: driveItem.apiBase }
@@ -1042,8 +1261,10 @@ const isTeamsPage = () => {
         document.addEventListener('tceVideoDownloadUrlReady', handler);
         setTimeout(() => { document.removeEventListener('tceVideoDownloadUrlReady', handler); resolve(null); }, 5000);
       });
+      busy.close();
       if (waitResult && waitResult.downloadUrl) {
         window.open(waitResult.downloadUrl, '_blank');
+        UI.toast({ kind: 'success', title: 'Video download started', message: DIRECT_DOWNLOAD_TOAST });
         return;
       }
     }
@@ -1053,72 +1274,67 @@ const isTeamsPage = () => {
     setupVideoDownloadPanel();
   };
 
+  const formatDuration = (sec) => {
+    const s = Math.max(0, Math.floor(sec || 0));
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    return hh ? `${hh}:${String(mm).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+  };
+
+  // Status line helper (aria-live region inside a panel).
+  const makeStatus = (text) => {
+    const el = UI.h('div', { class: 'tce-status', role: 'status', 'aria-live': 'polite', text });
+    const set = (message, kind) => {
+      el.textContent = message;
+      el.className = 'tce-status' + (kind ? ` tce-status--${kind}` : '');
+    };
+    return { el, set };
+  };
+
+  const statRow = (label, valueEl) => [UI.h('dt', { text: label }), UI.h('dd', null, [valueEl])];
+
+  const VIDEO_PANEL_ID = 'tce-video-panel';
+
   const setupVideoDownloadPanel = () => {
-    if (videoDownloadPanelOpen || document.getElementById('video-download-panel')) {
+    const existing = document.getElementById(VIDEO_PANEL_ID);
+    if (existing) {
+      UI.applyTheme(UI.getStack());
+      existing.querySelector('button:not([disabled])')?.focus();
       return;
     }
-    videoDownloadPanelOpen = true;
 
     const video = document.querySelector('video');
     if (!video) {
-      alert('No video found on this page.');
-      videoDownloadPanelOpen = false;
+      UI.toast({
+        kind: 'error',
+        title: 'No video found',
+        message: 'Open the recording so the player is on screen, then try again.'
+      });
       return;
     }
 
     const totalDuration = video.duration || 0;
-    const totalMins = Math.floor(totalDuration / 60);
-    const totalSecs = Math.floor(totalDuration % 60);
-
-    const panel = document.createElement('div');
-    panel.id = 'video-download-panel';
-    panel.innerHTML = `
-      <div class="vdp-header">
-        <span>🎬 Video Downloader</span>
-        <button class="vdp-close" id="vdp-close">\u00D7</button>
-      </div>
-      <div class="vdp-stats">
-        <div>📹 Video segments: <span id="vdp-video-count">0</span></div>
-        <div>🎵 Audio segments: <span id="vdp-audio-count">0</span></div>
-        <div>⏱️ Captured: <span id="vdp-duration">0:00</span> / ${totalMins}:${String(totalSecs).padStart(2, '0')}</div>
-      </div>
-      <div class="vdp-progress">
-        <div class="vdp-progress-fill" id="vdp-progress-fill"></div>
-      </div>
-      <div class="vdp-status" id="vdp-status">Click Start - plays at high speed while downloading segments</div>
-      <div class="vdp-buttons">
-        <button class="vdp-btn vdp-capture" id="vdp-capture" title="Best for DRM content - captures decrypted video at 16x speed">🚀 Start Capture</button>
-        <button class="vdp-btn vdp-stop" id="vdp-stop" disabled>⏹ Stop</button>
-      </div>
-      <div class="vdp-buttons" style="margin-top: 8px;">
-        <button class="vdp-btn vdp-download" id="vdp-combined" disabled style="background: linear-gradient(135deg, #00ff88, #00cc6a);" title="Save combined video+audio as single file">💾 Save Combined</button>
-        <button class="vdp-btn" id="vdp-download" disabled style="background: #666;" title="Save video and audio as separate files">📁 Separate</button>
-      </div>
-      <div class="vdp-buttons" style="margin-top: 8px;">
-        <button class="vdp-btn" id="vdp-analyze" style="background: #555; font-size: 10px;" title="View captured URL patterns in console">🔍</button>
-        <button class="vdp-btn" id="vdp-direct" style="background: linear-gradient(135deg, #ff6b6b, #ee5a5a); font-size: 10px;" title="Fast API download - only works for non-DRM content">⚡ Direct</button>
-      </div>
-      <div class="vdp-tip">🚀 Start → 💾 Save Combined (auto-merges video+audio)</div>
-    `;
-
-    document.body.appendChild(panel);
-
-    // Get elements
-    const closeBtn = document.getElementById('vdp-close');
-    const captureBtn = document.getElementById('vdp-capture');
-    const stopBtn = document.getElementById('vdp-stop');
-    const downloadBtn = document.getElementById('vdp-download');
-    const combinedBtn = document.getElementById('vdp-combined');
-    const videoCountEl = document.getElementById('vdp-video-count');
-    const audioCountEl = document.getElementById('vdp-audio-count');
-    const durationEl = document.getElementById('vdp-duration');
-    const progressEl = document.getElementById('vdp-progress-fill');
-    const statusEl = document.getElementById('vdp-status');
-
-    let isCapturing = false;
-
     // Estimate expected segments (roughly 2 seconds per segment)
     const expectedSegments = Math.ceil(totalDuration / 2);
+
+    const videoCountEl = UI.h('span', { text: '0' });
+    const audioCountEl = UI.h('span', { text: '0' });
+    const durationEl = UI.h('span', { text: expectedSegments ? `0 / ${expectedSegments}` : '0' });
+    const progress = UI.progressBar({ label: 'Capture progress', value: 0, max: 100 });
+    const status = makeStatus('Start capture to play the video at high speed and collect its segments.');
+
+    const captureBtn = UI.button({ label: 'Start capture', icon: 'play', variant: 'primary', className: 'tce-btn--grow',
+      title: 'Best for DRM content - captures decrypted video at 16x speed' });
+    const stopBtn = UI.button({ label: 'Stop', icon: 'stop', variant: 'secondary', disabled: true });
+    const combinedBtn = UI.button({ label: 'Save combined', icon: 'download', variant: 'primary', className: 'tce-btn--grow', disabled: true,
+      title: 'Save video and audio merged into a single MP4' });
+    const downloadBtn = UI.button({ label: 'Save separately', variant: 'secondary', className: 'tce-btn--grow', disabled: true,
+      title: 'Save video and audio as two files' });
+    const directBtn = UI.button({ label: 'Try direct download (non-DRM only)', variant: 'subtle', className: 'tce-btn--small' });
+    const mergeSlot = UI.h('div');
+
+    let isCapturing = false;
 
     // Listen for segment updates from injected script
     const updateHandler = (e) => {
@@ -1128,7 +1344,7 @@ const isTeamsPage = () => {
 
       // Show segment-based progress (more reliable than time)
       const capturedCount = videoCount || 0;
-      durationEl.textContent = `${capturedCount}/${expectedSegments} segs`;
+      durationEl.textContent = `${capturedCount} / ${expectedSegments}`;
 
       // Enable download if we have segments
       if (videoCount > 0 && !isCapturing) {
@@ -1138,29 +1354,47 @@ const isTeamsPage = () => {
     };
     window.addEventListener('teamsVideoSegmentUpdate', updateHandler);
 
-    // Check if capture is available
-    checkVideoCaptureAvailable().then(available => {
-      if (available) {
-        statusEl.textContent = 'Ready! Click Start Capture to begin.';
-      } else {
-        statusEl.textContent = '⏳ Waiting for video capture to initialize...';
-        // Retry after a short delay
-        setTimeout(async () => {
-          if (await checkVideoCaptureAvailable()) {
-            statusEl.textContent = 'Ready! Click Start Capture to begin.';
-          }
-        }, 1000);
+    const panel = UI.createPanel({
+      id: VIDEO_PANEL_ID,
+      title: 'Download video',
+      initialFocus: captureBtn,
+      onClose: () => {
+        if (isCapturing) sendVideoCommand('stopCapture');
+        isCapturing = false;
+        window.removeEventListener('teamsVideoSegmentUpdate', updateHandler);
       }
     });
 
-    // Close panel
-    closeBtn.addEventListener('click', async () => {
-      if (isCapturing) {
-        await sendVideoCommand('stopCapture');
+    panel.body.append(
+      UI.h('p', { text: 'Direct download isn’t available for this recording, so it will be captured while it plays at high speed. Keep this tab in the foreground.' }),
+      UI.h('dl', { class: 'tce-stats' }, [
+        ...statRow('Video segments', videoCountEl),
+        ...statRow('Audio segments', audioCountEl),
+        ...statRow('Captured', durationEl),
+        ...statRow('Length', UI.h('span', { text: formatDuration(totalDuration) }))
+      ]),
+      progress.el,
+      status.el,
+      UI.h('div', { class: 'tce-row' }, [captureBtn, stopBtn]),
+      UI.h('div', { class: 'tce-label', text: 'Save' }),
+      UI.h('div', { class: 'tce-row' }, [combinedBtn, downloadBtn]),
+      mergeSlot
+    );
+    panel.footer.append(directBtn);
+
+    // Check if capture is available
+    checkVideoCaptureAvailable().then(available => {
+      if (available) {
+        status.set('Ready. Start capture to begin.');
+      } else {
+        status.set('Waiting for video capture to initialize…');
+        // Retry after a short delay
+        setTimeout(async () => {
+          if (await checkVideoCaptureAvailable()) {
+            status.set('Ready. Start capture to begin.');
+          }
+        }, 1000);
       }
-      window.removeEventListener('teamsVideoSegmentUpdate', updateHandler);
-      panel.remove();
-      videoDownloadPanelOpen = false;
     });
 
     // Start high-speed capture
@@ -1169,7 +1403,7 @@ const isTeamsPage = () => {
       if (!videoCaptureAvailable) {
         const available = await checkVideoCaptureAvailable();
         if (!available) {
-          statusEl.textContent = '❌ Video capture not available. Reload page and try again.';
+          status.set('Video capture isn’t available. Reload the page and try again.', 'error');
           return;
         }
       }
@@ -1178,8 +1412,9 @@ const isTeamsPage = () => {
       captureBtn.disabled = true;
       stopBtn.disabled = false;
       downloadBtn.disabled = true;
+      mergeSlot.replaceChildren();
 
-      statusEl.textContent = '🚀 Starting capture...';
+      status.set('Starting capture…');
 
       // Clear previous capture
       await sendVideoCommand('clear');
@@ -1200,9 +1435,9 @@ const isTeamsPage = () => {
         // Set playback rate AFTER play starts (some browsers reject high rates before play)
         video.playbackRate = 16; // Start with 16x (most reliable)
         const actualRate = video.playbackRate;
-        statusEl.textContent = `🚀 Playing at ${actualRate}x speed...`;
+        status.set(`Playing at ${actualRate}x speed…`);
       } catch (e) {
-        statusEl.textContent = '⚠️ Click the video play button first, then try again.';
+        status.set('Click the video’s play button first, then try again.', 'warning');
         isCapturing = false;
         captureBtn.disabled = false;
         stopBtn.disabled = true;
@@ -1217,14 +1452,14 @@ const isTeamsPage = () => {
         }
 
         const currentTime = video.currentTime;
-        const progress = (currentTime / totalDuration) * 100;
-        progressEl.style.width = `${Math.min(progress, 100)}%`;
+        const pct = (currentTime / totalDuration) * 100;
+        progress.set(Math.min(pct, 100), 100);
 
         const stats = await sendVideoCommand('getStats');
         if (stats) {
           videoCountEl.textContent = stats.videoCount || 0;
           audioCountEl.textContent = stats.audioCount || 0;
-          statusEl.textContent = `⚡ ${Math.round(progress)}% - ${stats.videoCount || 0} video, ${stats.audioCount || 0} audio segments`;
+          status.set(`${Math.round(pct)}% · ${stats.videoCount || 0} video, ${stats.audioCount || 0} audio segments`);
         }
 
         // Check if done
@@ -1242,11 +1477,12 @@ const isTeamsPage = () => {
 
           const finalStats = await sendVideoCommand('getStats');
           if (finalStats && finalStats.videoCount > 0) {
-            statusEl.textContent = `✅ Complete! ${finalStats.videoCount} video + ${finalStats.audioCount} audio. Click Save.`;
+            status.set(`Capture complete: ${finalStats.videoCount} video + ${finalStats.audioCount} audio segments. Choose how to save.`, 'success');
             downloadBtn.disabled = false;
             combinedBtn.disabled = false;
+            combinedBtn.focus();
           } else {
-            statusEl.textContent = '⚠️ Capture finished but no segments captured.';
+            status.set('Capture finished but no segments were captured.', 'warning');
           }
         }
       }, 500);
@@ -1262,35 +1498,22 @@ const isTeamsPage = () => {
 
       const stats = await sendVideoCommand('getStats');
       if (stats && stats.videoCount > 0) {
-        statusEl.textContent = `⏹ Stopped. ${stats.videoCount} segments captured. Click Save.`;
+        status.set(`Stopped. ${stats.videoCount} segments captured. Choose how to save.`);
         downloadBtn.disabled = false;
         combinedBtn.disabled = false;
+        combinedBtn.focus();
       } else {
-        statusEl.textContent = '⏹ Capture stopped.';
-      }
-    });
-
-    // Analyze URLs button
-    const analyzeBtn = document.getElementById('vdp-analyze');
-    analyzeBtn.addEventListener('click', async () => {
-      statusEl.textContent = '🔍 Analyzing captured URLs...';
-      const result = await sendVideoCommand('analyzeUrls');
-      if (result) {
-        console.log('[URL Analysis]', result);
-        const urlCount = result.capturedUrls?.length || 0;
-        statusEl.textContent = `🔍 Found ${urlCount} URLs. Check console (F12) for details.`;
-      } else {
-        statusEl.textContent = '❌ No data - play video for a few seconds first';
+        status.set('Capture stopped.');
+        captureBtn.focus();
       }
     });
 
     // Direct download button
-    const directBtn = document.getElementById('vdp-direct');
     directBtn.addEventListener('click', async () => {
-      statusEl.textContent = '⚡ Testing direct API access...';
+      status.set('Testing direct API access…');
 
       const progressHandler = (e) => {
-        statusEl.textContent = '⚡ ' + (e.detail?.message || 'Processing...');
+        status.set(e.detail?.message || 'Processing…');
       };
       document.addEventListener('teamsVideoDownloadProgress', progressHandler);
 
@@ -1302,28 +1525,26 @@ const isTeamsPage = () => {
         if (result.success) {
           if (result.isDrmProtected) {
             // DRM detected - guide user to MSE capture
-            statusEl.textContent = `⚠️ DRM detected! Use 🚀 Start Capture instead`;
-            statusEl.style.background = 'rgba(255, 193, 7, 0.3)';
+            status.set('This video is DRM-protected. Use Start capture instead.', 'warning');
           } else {
-            statusEl.textContent = `✅ ${result.message}`;
-            statusEl.style.background = 'rgba(40, 167, 69, 0.3)';
+            status.set(result.message, 'success');
           }
         } else {
-          statusEl.textContent = `❌ ${result.error || result.message}`;
+          status.set(result.error || result.message || 'Direct download failed.', 'error');
         }
       } else {
-        statusEl.textContent = '❌ No response - reload page';
+        status.set('No response from the page. Reload and try again.', 'error');
       }
     });
 
-    // Save captured files
+    // Save captured files (separate video + audio)
     downloadBtn.addEventListener('click', async () => {
       downloadBtn.disabled = true;
-      statusEl.textContent = '💾 Starting download...';
+      status.set('Starting download…');
 
       // Listen for progress updates
       const progressHandler = (e) => {
-        statusEl.textContent = '💾 ' + (e.detail?.message || 'Processing...');
+        status.set(e.detail?.message || 'Processing…');
       };
       document.addEventListener('teamsVideoDownloadProgress', progressHandler);
 
@@ -1334,19 +1555,23 @@ const isTeamsPage = () => {
         document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
 
         if (!result) {
-          statusEl.textContent = '❌ No response - reload page and try again';
+          status.set('No response from the page. Reload and try again.', 'error');
         } else if (result.error) {
-          statusEl.textContent = '❌ ' + result.error;
+          status.set(result.error, 'error');
         } else if (result.success) {
           videoCountEl.textContent = result.videoCount;
           audioCountEl.textContent = result.audioCount || 'N/A';
-          progressEl.style.width = '100%';
-          statusEl.textContent = `✅ Saved! Merge: ffmpeg -i "${result.title}-video.mp4" -i "${result.title}-audio.mp4" -c copy output.mp4`;
+          progress.set(100, 100);
+          status.set('Saved video and audio as separate files.', 'success');
+          mergeSlot.replaceChildren(UI.codeDisclosure(
+            'Show manual merge command',
+            `ffmpeg -i "${result.title}-video.mp4" -i "${result.title}-audio.mp4" -c copy "${result.title}.mp4"`
+          ));
         }
       } catch (err) {
         document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
         console.error('[Teams Chat Extractor] Save failed:', err);
-        statusEl.textContent = '❌ ' + err.message;
+        status.set(err.message, 'error');
       }
 
       downloadBtn.disabled = false;
@@ -1356,10 +1581,10 @@ const isTeamsPage = () => {
     combinedBtn.addEventListener('click', async () => {
       combinedBtn.disabled = true;
       downloadBtn.disabled = true;
-      statusEl.textContent = '💾 Preparing combined file...';
+      status.set('Preparing combined file…');
 
       const progressHandler = (e) => {
-        statusEl.textContent = '💾 ' + (e.detail?.message || 'Processing...');
+        status.set(e.detail?.message || 'Processing…');
       };
       document.addEventListener('teamsVideoDownloadProgress', progressHandler);
 
@@ -1369,81 +1594,68 @@ const isTeamsPage = () => {
         document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
 
         if (!result) {
-          statusEl.textContent = '❌ No response - reload page and try again';
+          status.set('No response from the page. Reload and try again.', 'error');
         } else if (result.error) {
-          statusEl.textContent = '❌ ' + result.error;
+          status.set(result.error, 'error');
         } else if (result.success) {
-          progressEl.style.width = '100%';
-          statusEl.textContent = `✅ Downloaded: ${result.title}.mp4 (${result.sizeMB} MB)`;
+          progress.set(100, 100);
+          status.set(`Downloaded ${result.title}.mp4 (${result.sizeMB} MB)`, 'success');
         }
       } catch (err) {
         document.removeEventListener('teamsVideoDownloadProgress', progressHandler);
         console.error('[Teams Chat Extractor] Combined save failed:', err);
-        statusEl.textContent = '❌ ' + err.message;
+        status.set(err.message, 'error');
       }
 
       combinedBtn.disabled = false;
       downloadBtn.disabled = false;
     });
-  }
+  };
 
   // === BATCH TRANSCRIPT PANEL ===
-  let batchPanelOpen = false;
+  const BATCH_PANEL_ID = 'tce-batch-panel';
+
+  let zipModulePromise = null;
+  const loadZip = () => {
+    zipModulePromise = zipModulePromise || import(chrome.runtime.getURL('src/modules/zip.js'));
+    return zipModulePromise;
+  };
 
   const setupBatchTranscriptPanel = () => {
-    if (batchPanelOpen || document.getElementById('batch-transcript-panel')) {
+    const existing = document.getElementById(BATCH_PANEL_ID);
+    if (existing) {
+      UI.applyTheme(UI.getStack());
+      existing.querySelector('button:not([disabled])')?.focus();
       return;
     }
-    batchPanelOpen = true;
 
-    const panel = document.createElement('div');
-    panel.id = 'batch-transcript-panel';
-    panel.innerHTML = `
-      <div class="btp-header">
-        <span>Batch Transcripts</span>
-        <button class="btp-close" id="btp-close">\u00D7</button>
-      </div>
-      <div class="btp-stats">
-        <div>Meetings: <span id="btp-total">--</span></div>
-        <div>With transcript: <span id="btp-found">--</span></div>
-        <div>Progress: <span id="btp-current">0</span> / <span id="btp-total2">--</span></div>
-      </div>
-      <div class="btp-progress">
-        <div class="btp-progress-fill" id="btp-progress-fill"></div>
-      </div>
-      <div class="btp-status" id="btp-status">Click Start to enumerate meetings and extract all transcripts.</div>
-      <div class="btp-log" id="btp-log"></div>
-      <div class="btp-buttons">
-        <button class="btp-btn btp-start" id="btp-start">Start</button>
-        <button class="btp-btn btp-cancel" id="btp-cancel" disabled>Cancel</button>
-      </div>
-      <div class="btp-buttons" style="margin-top: 8px;">
-        <button class="btp-btn btp-download-all" id="btp-download-vtt" disabled>Download All VTT</button>
-        <button class="btp-btn btp-download-all" id="btp-download-txt" disabled>Download All TXT</button>
-      </div>
-    `;
+    const totalEl = UI.h('span', { text: '–' });
+    const foundEl = UI.h('span', { text: '–' });
+    const currentEl = UI.h('span', { text: '0 / –' });
+    const progress = UI.progressBar({ label: 'Batch progress', value: 0, max: 1 });
+    const status = makeStatus('Start to find every meeting in this series and extract each transcript.');
+    const logEl = UI.h('ul', { class: 'tce-log', 'aria-label': 'Activity log' });
 
-    document.body.appendChild(panel);
+    const startBtn = UI.button({ label: 'Start', icon: 'play', variant: 'primary', className: 'tce-btn--grow' });
+    const cancelBtn = UI.button({ label: 'Cancel', variant: 'secondary', disabled: true });
 
-    const closeBtn = document.getElementById('btp-close');
-    const startBtn = document.getElementById('btp-start');
-    const cancelBtn = document.getElementById('btp-cancel');
-    const downloadVttBtn = document.getElementById('btp-download-vtt');
-    const downloadTxtBtn = document.getElementById('btp-download-txt');
-    const totalEl = document.getElementById('btp-total');
-    const total2El = document.getElementById('btp-total2');
-    const foundEl = document.getElementById('btp-found');
-    const currentEl = document.getElementById('btp-current');
-    const progressEl = document.getElementById('btp-progress-fill');
-    const statusEl = document.getElementById('btp-status');
-    const logEl = document.getElementById('btp-log');
+    const formatName = UI.uid('fmt');
+    const formatGroup = UI.h('div', { class: 'tce-segmented', role: 'radiogroup', 'aria-label': 'File format' },
+      [['vtt', 'VTT'], ['txt', 'TXT'], ['both', 'Both']].map(([value, label], i) =>
+        UI.h('label', null, [
+          UI.h('input', { type: 'radio', name: formatName, value, checked: i === 0 }),
+          UI.h('span', { text: label })
+        ])
+      )
+    );
+    const zipBtn = UI.button({ label: 'Download .zip', icon: 'zip', variant: 'primary', className: 'tce-btn--grow', disabled: true });
+    const separateBtn = UI.button({ label: 'Save as separate files', variant: 'subtle', className: 'tce-btn--small', disabled: true });
 
     let batchResults = null;
+    let total = 0;
 
     const addLog = (text, type = 'info') => {
-      const line = document.createElement('div');
-      line.className = `btp-log-line btp-log-${type}`;
-      line.textContent = text;
+      const line = UI.h('li', { class: `tce-log__${type}`, text, title: text });
       logEl.appendChild(line);
       logEl.scrollTop = logEl.scrollHeight;
     };
@@ -1451,16 +1663,15 @@ const isTeamsPage = () => {
     // Listen for progress events from the injected script
     const progressHandler = (e) => {
       const d = e.detail;
-      statusEl.textContent = d.message || '';
+      if (d.message) status.set(d.message);
 
       if (d.total) {
+        total = d.total;
         totalEl.textContent = d.total;
-        total2El.textContent = d.total;
       }
-      if (d.current) {
-        currentEl.textContent = d.current;
-        const pct = (d.current / d.total) * 100;
-        progressEl.style.width = `${Math.min(pct, 100)}%`;
+      if (d.current && total) {
+        currentEl.textContent = `${d.current} / ${total}`;
+        progress.set(d.current, total);
       }
       if (d.transcriptsFound !== undefined) {
         foundEl.textContent = d.transcriptsFound;
@@ -1470,70 +1681,104 @@ const isTeamsPage = () => {
         const src = d.source === 'api' ? '[API]' : '[DOM]';
         addLog(`${src} ${d.currentMeeting}: ${d.entryCount} entries`, 'success');
       } else if (d.phase === 'api_attempt') {
-        addLog(`Trying API for ${d.currentMeeting}...`, 'info');
+        addLog(`Trying API for ${d.currentMeeting}…`, 'info');
       } else if (d.phase === 'skipped') {
         addLog(`${d.currentMeeting}: no transcript`, 'warn');
       } else if (d.phase === 'complete') {
         const apiNote = d.apiSuccessCount > 0 ? ` (${d.apiSuccessCount} API, ${d.domFallbackCount} DOM)` : '';
         addLog(`Complete: ${d.transcriptsFound}/${d.total} meetings had transcripts${apiNote}`, 'success');
         foundEl.textContent = d.transcriptsFound;
+        progress.set(total || 1, total || 1);
       }
     };
     document.addEventListener('teamsBatchTranscriptProgress', progressHandler);
 
-    // Helper to download a file
-    const downloadFile = (content, filename) => {
-      const a = document.createElement('a');
-      a.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(content));
-      a.setAttribute('download', filename);
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+    const panel = UI.createPanel({
+      id: BATCH_PANEL_ID,
+      title: 'Batch transcripts',
+      initialFocus: startBtn,
+      onClose: () => {
+        sendBatchCommand('cancel');
+        document.removeEventListener('teamsBatchTranscriptProgress', progressHandler);
+      }
+    });
+
+    panel.body.append(
+      UI.h('dl', { class: 'tce-stats' }, [
+        ...statRow('Meetings', totalEl),
+        ...statRow('With transcript', foundEl),
+        ...statRow('Processed', currentEl)
+      ]),
+      progress.el,
+      status.el,
+      logEl,
+      UI.h('div', { class: 'tce-row' }, [startBtn, cancelBtn]),
+      UI.h('div', { class: 'tce-label', text: 'Save' }),
+      UI.h('div', { class: 'tce-row' }, [formatGroup, zipBtn]),
+      UI.h('div', { class: 'tce-row' }, [separateBtn])
+    );
+
+    const selectedFormats = () => {
+      const v = formatGroup.querySelector('input:checked')?.value || 'vtt';
+      return v === 'both' ? ['vtt', 'txt'] : [v];
     };
 
-    // Sanitize text for filenames
-    const sanitize = (text) => text.replace(/[<>:"/\\|?*]/g, '-').replace(/\s+/g, ' ').trim().substring(0, 80);
-
-    // Close
-    closeBtn.addEventListener('click', () => {
-      sendBatchCommand('cancel');
-      document.removeEventListener('teamsBatchTranscriptProgress', progressHandler);
-      panel.remove();
-      batchPanelOpen = false;
-    });
+    const buildFiles = () => {
+      const withTranscript = batchResults.results.filter((r) => r.hasTranscript);
+      const series = UI.sanitizeFilename(batchResults.seriesName, 'Meeting', 80);
+      const files = [];
+      for (const r of withTranscript) {
+        const base = `${series} - ${UI.sanitizeFilename(r.meetingDate, `Meeting ${r.index + 1}`, 80)}`;
+        for (const fmt of selectedFormats()) {
+          files.push({ name: `${base}.${fmt}`, data: fmt === 'txt' ? r.txt : r.vtt });
+        }
+      }
+      return { series, files, count: withTranscript.length };
+    };
 
     // Start
     startBtn.addEventListener('click', async () => {
       startBtn.disabled = true;
       cancelBtn.disabled = false;
-      downloadVttBtn.disabled = true;
-      downloadTxtBtn.disabled = true;
-      logEl.innerHTML = '';
+      zipBtn.disabled = true;
+      separateBtn.disabled = true;
+      logEl.replaceChildren();
       batchResults = null;
+      total = 0;
+      progress.set(null);
+      status.set('Finding meetings…');
 
-      addLog('Starting batch extraction...');
+      addLog('Starting batch extraction…');
       const result = await sendBatchCommand('start');
 
       startBtn.disabled = false;
       cancelBtn.disabled = true;
 
       if (!result) {
-        statusEl.textContent = 'No response from batch script. Reload page.';
+        status.set('No response from the batch script. Reload the page and try again.', 'error');
         addLog('Error: no response', 'error');
+        progress.set(0, 1);
         return;
       }
       if (result.error) {
-        statusEl.textContent = result.error;
+        status.set(result.error, 'error');
         addLog(`Error: ${result.error}`, 'error');
+        progress.set(0, 1);
         return;
       }
       if (result.success) {
         batchResults = result;
-        progressEl.style.width = '100%';
         const withTranscript = result.results.filter((r) => r.hasTranscript);
-        downloadVttBtn.disabled = withTranscript.length === 0;
-        downloadTxtBtn.disabled = withTranscript.length === 0;
+        const n = result.results.length || 1;
+        progress.set(n, n);
+        zipBtn.disabled = withTranscript.length === 0;
+        separateBtn.disabled = withTranscript.length === 0;
+        if (withTranscript.length) {
+          status.set(`${withTranscript.length} of ${result.results.length} meetings have transcripts. Ready to download.`, 'success');
+          zipBtn.focus();
+        } else {
+          status.set('None of these meetings has a transcript.', 'warning');
+        }
       }
     });
 
@@ -1542,30 +1787,40 @@ const isTeamsPage = () => {
       sendBatchCommand('cancel');
       cancelBtn.disabled = true;
       addLog('Cancelled by user', 'warn');
+      status.set('Cancelling…', 'warning');
     });
 
-    // Download all VTT
-    downloadVttBtn.addEventListener('click', () => {
+    // Download everything as a single .zip
+    zipBtn.addEventListener('click', async () => {
       if (!batchResults) return;
-      const withTranscript = batchResults.results.filter((r) => r.hasTranscript);
-      const series = sanitize(batchResults.seriesName);
-      withTranscript.forEach((r) => {
-        const date = sanitize(r.meetingDate);
-        downloadFile(r.vtt, `${series} - ${date}.vtt`);
-      });
-      addLog(`Downloaded ${withTranscript.length} VTT files`);
+      zipBtn.disabled = true;
+      try {
+        const { createZipBlob } = await loadZip();
+        const { series, files, count } = buildFiles();
+        const zipName = `${series} transcripts.zip`;
+        saveBlob(createZipBlob(files), zipName);
+        addLog(`Saved ${zipName} (${count} meetings, ${files.length} files)`, 'success');
+        UI.toast({ kind: 'success', message: `Saved ${zipName}` });
+      } catch (err) {
+        console.error('[Teams Chat Extractor] Zip failed:', err);
+        addLog(`Error: ${err.message}`, 'error');
+        UI.toast({ kind: 'error', title: 'Couldn’t create the .zip', message: `${err.message}. Try “Save as separate files”.` });
+      } finally {
+        zipBtn.disabled = false;
+      }
     });
 
-    // Download all TXT
-    downloadTxtBtn.addEventListener('click', () => {
+    // Secondary: one download per file (Chrome may ask to allow multiple downloads)
+    separateBtn.addEventListener('click', async () => {
       if (!batchResults) return;
-      const withTranscript = batchResults.results.filter((r) => r.hasTranscript);
-      const series = sanitize(batchResults.seriesName);
-      withTranscript.forEach((r) => {
-        const date = sanitize(r.meetingDate);
-        downloadFile(r.txt, `${series} - ${date}.txt`);
-      });
-      addLog(`Downloaded ${withTranscript.length} TXT files`);
+      separateBtn.disabled = true;
+      const { files } = buildFiles();
+      for (const f of files) {
+        downloadFile(f.data, f.name);
+        await new Promise((r) => setTimeout(r, 250));
+      }
+      addLog(`Downloaded ${files.length} files`);
+      separateBtn.disabled = false;
     });
   };
 
@@ -1587,7 +1842,7 @@ const isTeamsPage = () => {
         injectTranscriptActionButtons();
       }
       // Check if Teams recap page needs buttons
-      if (!document.querySelector('.tce-teams-recap-bar')) {
+      if (!document.querySelector('.tce-recap-bar')) {
         injectTeamsRecapButtons();
       }
     });
