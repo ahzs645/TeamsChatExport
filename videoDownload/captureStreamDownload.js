@@ -248,8 +248,10 @@
   };
 
   const getFileName = (ext) => {
-    const title = document.querySelector('h1, h2, [class*="videoTitle"] label')
-      ?.textContent?.trim()?.replace(/[^a-zA-Z0-9\s-]/g, '')?.trim() || 'recording';
+    const raw = document.querySelector('h1, h2, [class*="videoTitle"] label')?.textContent || '';
+    // Keep non-ASCII titles; strip only characters illegal in filenames.
+    const title = (window.__tceUI ? window.__tceUI.sanitizeFilename(raw, 'recording')
+      : (raw.replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim() || 'recording'));
     return `${title}.${ext}`;
   };
 
