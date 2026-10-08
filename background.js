@@ -113,67 +113,54 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       }
     });
   } else if (request.action === "download") {
-    // Get existing saved extractions
-    chrome.storage.local.get(['savedExtractions'], (result) => {
-      const savedExtractions = result.savedExtractions || {};
-      
-      // Add new extraction with timestamp
-      const timestamp = new Date().toLocaleString();
-      Object.keys(request.data).forEach(conversationName => {
-        const newName = `[${timestamp}] ${conversationName}`;
-        savedExtractions[newName] = request.data[conversationName];
-      });
-      
-      // Save accumulated data
-      chrome.storage.local.set({
-        teamsChatData: request.data, // Current extraction for immediate display
-        savedExtractions: savedExtractions // All accumulated extractions
-      }, () => {
-        // Open in new tab each time
-        chrome.tabs.create({url: chrome.runtime.getURL("results.html")});
-      });
-    });
+    // Legacy entry point: persist the extraction and open the viewer on it.
+    storeExtraction(request.data, (keys) => openResultsTab(keys));
   } else if (request.action === "openResults") {
-    // Persist the latest extraction and open the results viewer
-    chrome.storage.local.get(['savedExtractions'], (result) => {
-      const savedExtractions = { ...(result.savedExtractions || {}) };
-      const timestamp = new Date().toLocaleString();
-
-      if (request.data) {
-        Object.keys(request.data).forEach((conversationName) => {
-          const newName = `[${timestamp}] ${conversationName}`;
-          savedExtractions[newName] = request.data[conversationName];
-        });
+    // Persist the latest extraction, then open the viewer with the stored key selected.
+    // The viewer reads everything from storage; no displayData message is sent any more,
+    // so an extraction appears exactly once in the sidebar.
+    storeExtraction(request.data, (keys) => {
+      openResultsTab(keys);
+      if (typeof sendResponse === 'function') {
+        sendResponse({ success: true, keys });
       }
-
-      chrome.storage.local.set({
-        teamsChatData: request.data || {},
-        savedExtractions
-      }, () => {
-        chrome.tabs.create({ url: chrome.runtime.getURL("results.html") }, (tab) => {
-          if (tab && request.data && Object.keys(request.data).length > 0) {
-            const handleUpdated = (tabId, changeInfo) => {
-              if (tabId === tab.id && changeInfo.status === 'complete') {
-                chrome.tabs.onUpdated.removeListener(handleUpdated);
-                chrome.tabs.sendMessage(tab.id, {
-                  action: 'displayData',
-                  data: request.data
-                }, () => {
-                  if (chrome.runtime.lastError) {
-                    console.warn('Results page message error:', chrome.runtime.lastError.message);
-                  }
-                });
-              }
-            };
-            chrome.tabs.onUpdated.addListener(handleUpdated);
-          }
-
-          if (typeof sendResponse === 'function') {
-            sendResponse({ success: true });
-          }
-        });
-      });
     });
     return true;
   }
 });
+
+// savedExtractions:     { "[<locale time>] <chat name>": messages[] }  (key format read by older exports)
+// savedExtractionsMeta: { <same key>: { name, source: 'extract', savedAt } }
+// teamsChatData:        the latest extraction only (fallback for the viewer)
+function storeExtraction(data, callback) {
+  chrome.storage.local.get(['savedExtractions', 'savedExtractionsMeta'], (result) => {
+    const savedExtractions = { ...(result.savedExtractions || {}) };
+    const savedExtractionsMeta = { ...(result.savedExtractionsMeta || {}) };
+    const now = new Date();
+    const stamp = now.toLocaleString();
+    const keys = [];
+
+    Object.keys(data || {}).forEach((conversationName) => {
+      let key = `[${stamp}] ${conversationName}`;
+      for (let n = 2; key in savedExtractions; n += 1) {
+        key = `[${stamp} #${n}] ${conversationName}`;
+      }
+      savedExtractions[key] = data[conversationName];
+      savedExtractionsMeta[key] = { name: conversationName, source: 'extract', savedAt: now.toISOString() };
+      keys.push(key);
+    });
+
+    chrome.storage.local.set({
+      teamsChatData: data || {},
+      savedExtractions,
+      savedExtractionsMeta
+    }, () => callback(keys));
+  });
+}
+
+// Opens a new viewer tab; results.html?select=<key> selects the freshly stored conversation.
+function openResultsTab(keys) {
+  const url = chrome.runtime.getURL('results.html') +
+    (keys && keys.length ? `?select=${encodeURIComponent(keys[0])}` : '');
+  chrome.tabs.create({ url });
+}
