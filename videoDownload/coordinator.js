@@ -153,6 +153,87 @@
     }));
   });
 
+  // === Progress panel (page world) ===
+  // Uses the shared panel helper (ui/tceUI.js, injected into this world by
+  // content.js) so it matches the content-script panels and lives in the same
+  // top-right stack. Always has a Close button; failures show a readable error.
+  const PROGRESS_PANEL_ID = 'tce-download-progress';
+
+  const describeError = (err) => {
+    const msg = typeof err === 'string' ? err : ((err && (err.message || err.error)) || '');
+    if (!msg || msg === 'All download methods failed') {
+      return 'None of the download methods worked for this video. Play the video for a few seconds, then try again, or use Record Stream.';
+    }
+    return msg;
+  };
+
+  const showProgressPanel = (method) => {
+    const ui = window.__tceUI;
+    let panel = null;
+    let statusEl = null;
+    let bar = null;
+    let detailEl = null;
+
+    if (ui) {
+      document.getElementById(PROGRESS_PANEL_ID)?.remove();
+      panel = ui.createPanel({ id: PROGRESS_PANEL_ID, title: 'Downloading video', wide: true, focus: false });
+      statusEl = ui.h('div', { class: 'tce-status', role: 'status', 'aria-live': 'polite', text: 'Starting…' });
+      bar = ui.progressBar({ label: 'Download progress', value: null });
+      detailEl = ui.h('p', { class: 'tce-hint', text: 'Keep this tab open until the download finishes.' });
+      const stopBtn = ui.button({ label: 'Stop', icon: 'stop', variant: 'secondary' });
+      stopBtn.addEventListener('click', () => {
+        stop();
+        stopBtn.disabled = true;
+        statusEl.textContent = 'Stopping…';
+      });
+      panel.body.append(bar.el, statusEl, detailEl);
+      panel.footer.append(stopBtn);
+    } else {
+      console.warn('[VideoCoordinator] UI helpers not loaded; progress is logged to the console only');
+    }
+
+    const setStatus = (text, kind) => {
+      if (!statusEl) return;
+      statusEl.textContent = text;
+      statusEl.className = 'tce-status' + (kind ? ' tce-status--' + kind : '');
+    };
+
+    const fail = (err) => {
+      const message = describeError(err);
+      console.error('[VideoCoordinator] Download error:', err);
+      if (!panel || panel.closed) {
+        if (ui) ui.toast({ kind: 'error', title: 'Video download failed', message });
+        return;
+      }
+      panel.titleEl.textContent = 'Video download failed';
+      setStatus(message, 'error');
+      if (bar) bar.el.remove();
+      if (detailEl) detailEl.textContent = 'You can close this panel and try another method from the extension popup.';
+      panel.footer.replaceChildren();
+      panel.closeBtn.focus();
+    };
+
+    download(
+      (progress) => {
+        setStatus(progress.message || progress.stage || 'Working…');
+        if (bar) bar.set(progress.percent !== undefined ? progress.percent : null, 100);
+      },
+      method
+    ).then((result) => {
+      console.log('[VideoCoordinator] Download result:', result);
+      if (!result || !result.success) {
+        fail(result);
+        return;
+      }
+      // manifestDownload shows its own save panel; other methods have already
+      // handed the file to the browser.
+      if (panel) panel.close('done');
+      if (ui && result.method !== 'manifestDownload') {
+        ui.toast({ kind: 'success', title: 'Video download complete', message: 'Check your browser downloads.' });
+      }
+    }).catch(fail);
+  };
+
   // === DOM-based command interface (for content script communication) ===
   // Content script writes commands to a hidden div since inline scripts are blocked by CSP.
   let lastCmdTimestamp = '0';
@@ -170,37 +251,7 @@
     if (command === 'download') {
       console.log('[VideoCoordinator] Download command received, method:', method || 'auto');
 
-      // Create visible progress panel
-      let panel = document.getElementById('tce-download-progress');
-      if (!panel) {
-        panel = document.createElement('div');
-        panel.id = 'tce-download-progress';
-        panel.style.cssText = 'position:fixed;top:10px;left:50%;transform:translateX(-50%);z-index:99999;padding:16px 24px;background:rgba(0,0,0,0.92);color:white;border-radius:10px;font-family:monospace;font-size:13px;min-width:500px;text-align:center;';
-        panel.innerHTML = '<div id="tce-dl-status">Starting...</div>' +
-          '<div style="background:#333;height:20px;border-radius:10px;margin:8px 0;overflow:hidden">' +
-          '<div id="tce-dl-bar" style="background:#28a745;height:100%;width:0%;transition:width 0.3s"></div></div>' +
-          '<div id="tce-dl-detail"></div>';
-        document.body.appendChild(panel);
-      }
-
-      download(
-        (progress) => {
-          const statusEl = document.getElementById('tce-dl-status');
-          const barEl = document.getElementById('tce-dl-bar');
-          if (statusEl) statusEl.textContent = progress.message || progress.stage || 'working...';
-          if (barEl && progress.percent !== undefined) barEl.style.width = progress.percent + '%';
-        },
-        method || undefined
-      ).then((result) => {
-        console.log('[VideoCoordinator] Download result:', result);
-        // Panel with save buttons is created by manifestDownload itself
-        const progressPanel = document.getElementById('tce-download-progress');
-        if (progressPanel) progressPanel.remove();
-      }).catch((err) => {
-        const statusEl = document.getElementById('tce-dl-status');
-        if (statusEl) statusEl.textContent = 'ERROR: ' + err.message;
-        console.error('[VideoCoordinator] Download error:', err);
-      });
+      showProgressPanel(method || undefined);
     } else if (command === 'stop') {
       stop();
     }
