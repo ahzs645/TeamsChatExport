@@ -15,6 +15,9 @@ On a meeting recording (Teams recap, SharePoint or Stream `stream.aspx` page):
 - **Download subtitles (.vtt)** with timestamps, or **Download text (.txt)** for plain reading.
 - **Download all meeting transcripts**: opens a panel on the page that walks through every meeting in a recurring series and saves each transcript.
 
+Open the **Transcript** tab before exporting so Teams loads the speaker names.
+The exporter matches names to subtitle cue IDs, keeping the original subtitle timestamps.
+If Teams supplies no matching speaker data, those cues remain unlabelled; names are never guessed.
 If the transcript is not ready yet, play the recording for a few seconds so Teams loads it.
 
 ### Meeting recordings

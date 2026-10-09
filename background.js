@@ -56,6 +56,16 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 const transcriptAPICache = {}; // { tabId: { metadata, tokens, transcriptData } }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'getTranscriptSpeakers') {
+    const tabId = sender.tab?.id;
+    if (!tabId) { sendResponse({ speakers: {} }); return false; }
+    // Ask the live transcript frame. No transcript text or speaker cache is
+    // persisted, and entry IDs prevent names crossing into another meeting.
+    chrome.tabs.sendMessage(tabId, { action: 'getLocalTranscriptSpeakers' }, response => {
+      sendResponse({ speakers: chrome.runtime.lastError ? {} : response?.speakers || {} });
+    });
+    return true;
+  }
   if (request.action === 'storeTranscriptAPIMeta') {
     const tabId = sender.tab?.id;
     if (tabId) {

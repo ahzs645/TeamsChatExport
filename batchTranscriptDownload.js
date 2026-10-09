@@ -280,8 +280,8 @@
 			let entryCount = 0;
 
 			if (text.startsWith('WEBVTT')) {
-				vtt = text;
-				txt = convertVttToTxt(text);
+				vtt = enrichVtt(text);
+				txt = convertVttToTxt(vtt);
 				entryCount = (text.match(/-->/g) || []).length;
 			} else if (contentType.includes('json') || text.startsWith('{') || text.startsWith('[')) {
 				try {
@@ -325,23 +325,17 @@
 		}
 	};
 
-	const convertVttToTxt = (vttContent) => {
-		const lines = vttContent.split('\n');
-		const txtLines = [];
-		let currentTimestamp = '';
-		for (const line of lines) {
-			if (line.includes('-->')) {
-				currentTimestamp = line.split('-->')[0].trim().split('.')[0] || '00:00:00';
-			} else if (line.trim() && !line.startsWith('WEBVTT') && !line.startsWith('NOTE') && !line.match(/^\d+$/)) {
-				const vMatch = line.match(/^<v\s+([^>]+)>(.+)<\/v>$/);
-				if (vMatch) {
-					txtLines.push(`[${currentTimestamp}] ${vMatch[1]}: ${vMatch[2]}`);
-				} else if (line.trim()) {
-					txtLines.push(`[${currentTimestamp}] ${line.trim()}`);
-				}
-			}
-		}
-		return txtLines.join('\n') || vttContent;
+	const convertVttToTxt = (vtt) => window.__tceTranscript.convertVttToTxt(vtt);
+	const enrichVtt = (vtt) => {
+		let speakers = {};
+		try {
+			speakers = JSON.parse(document.getElementById('tce-transcript-speakers')?.getAttribute('data-speakers') || '{}');
+		} catch (e) {}
+		const local = document.getElementById('teams-chat-exporter-transcript-data');
+		return window.__tceTranscript.enrichVtt(vtt, {
+			...speakers,
+			...window.__tceTranscript.speakerMap(local?.getAttribute('data-vtt') || '')
+		});
 	};
 
 	// ========== DOM EXTRACTION (fallback) ==========

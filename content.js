@@ -25,6 +25,7 @@ const isTeamsPage = () => {
 (() => {
   const injectScript = (url, name) => {
     const script = document.createElement('script');
+    script.async = false;
     script.src = chrome.runtime.getURL(url);
     script.onload = () => {
       console.log(`[Teams Chat Extractor] ${name} injected`);
@@ -42,6 +43,8 @@ const isTeamsPage = () => {
     window.__tceUIInjected = true;
     injectScript('ui/tceUI.js', 'UI helpers');
   }
+
+  injectScript('transcriptUtils.js', 'Transcript formatting helpers');
 
   // Inject fetch override first (captures tokens)
   if (!window.__teamsChatOverrideInjectedEarly) {
@@ -121,6 +124,8 @@ const isTeamsPage = () => {
     }
   }
   const UI = globalThis.__tceUI;
+  if (!globalThis.__tceTranscript) await import(chrome.runtime.getURL('transcriptUtils.js'));
+  const transcript = globalThis.__tceTranscript;
 
   console.log('Teams Chat Extractor initialized');
 
@@ -172,6 +177,30 @@ const isTeamsPage = () => {
   // Store cross-frame metadata received from background
   let crossFrameAPIMeta = {};
   let crossFrameTokens = {};
+
+  const getLocalTranscriptSpeakers = () => {
+    const div = document.getElementById('teams-chat-exporter-transcript-data');
+    return transcript.speakerMap(div?.getAttribute('data-vtt') || div?.textContent || '');
+  };
+  let transcriptSpeakers = {};
+  const refreshTranscriptSpeakers = async () => {
+    const speakers = await new Promise(resolve => {
+      chrome.runtime.sendMessage({ action: 'getTranscriptSpeakers' }, response => {
+        resolve(chrome.runtime.lastError ? {} : response?.speakers || {});
+      });
+    });
+    transcriptSpeakers = { ...speakers, ...getLocalTranscriptSpeakers() };
+    let bridge = document.getElementById('tce-transcript-speakers');
+    if (!bridge) {
+      bridge = document.createElement('div');
+      bridge.id = 'tce-transcript-speakers';
+      bridge.hidden = true;
+      document.body.appendChild(bridge);
+    }
+    bridge.setAttribute('data-speakers', JSON.stringify(transcriptSpeakers));
+  };
+  // Keep the page-world batch downloader supplied with names from other frames.
+  setInterval(refreshTranscriptSpeakers, 2000);
 
   // === FRAME GATING ===
   // content.js runs in every frame (all_frames: true) and the popup messages
@@ -238,6 +267,13 @@ const isTeamsPage = () => {
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.action) {
+      case 'getLocalTranscriptSpeakers': {
+        const speakers = getLocalTranscriptSpeakers();
+        // Only a frame with names responds; the top frame must not win with {}.
+        if (!Object.keys(speakers).length) return false;
+        sendResponse({ speakers });
+        return false;
+      }
       case 'transcriptAPIMetaUpdated':
         // Received API metadata from another frame (via background.js)
         crossFrameAPIMeta = request.metadata || {};
@@ -550,24 +586,8 @@ const isTeamsPage = () => {
     return null;
   };
 
-  const convertVttToTxt = (vttContent) => {
-    const lines = vttContent.split('\n');
-    const txtLines = [];
-    let currentTimestamp = '';
-    for (const line of lines) {
-      if (line.includes('-->')) {
-        currentTimestamp = line.split('-->')[0].trim().split('.')[0] || '00:00:00';
-      } else if (line.trim() && !line.startsWith('WEBVTT') && !line.startsWith('NOTE') && !line.match(/^\d+$/)) {
-        const vMatch = line.match(/^<v\s+([^>]+)>(.+)<\/v>$/);
-        if (vMatch) {
-          txtLines.push(`[${currentTimestamp}] ${vMatch[1]}: ${vMatch[2]}`);
-        } else if (line.trim()) {
-          txtLines.push(`[${currentTimestamp}] ${line.trim()}`);
-        }
-      }
-    }
-    return txtLines.join('\n') || vttContent;
-  };
+  const convertVttToTxt = transcript.convertVttToTxt;
+  const enrichVtt = (vtt) => transcript.enrichVtt(vtt, transcriptSpeakers);
 
   const fetchTranscriptViaAPI = async (apiMeta) => {
     if (!apiMeta || !apiMeta.resources) return null;
@@ -605,8 +625,8 @@ const isTeamsPage = () => {
       let txt = '';
 
       if (text.startsWith('WEBVTT')) {
-        vtt = text;
-        txt = convertVttToTxt(text);
+        vtt = enrichVtt(text);
+        txt = convertVttToTxt(vtt);
       } else if (contentType.includes('json') || text.startsWith('{') || text.startsWith('[')) {
         try {
           const data = JSON.parse(text);
@@ -663,6 +683,7 @@ const isTeamsPage = () => {
 
   // Priority: 1) API metadata fetch (local or cross-frame), 2) captured cdnmedia, 3) React state, 4) DOM
   const getTranscriptData = async () => {
+    await refreshTranscriptSpeakers();
     const utils = window.__teamsTranscriptUtils;
 
     // 1a. Try API approach via local readcollabobject metadata
@@ -719,8 +740,8 @@ const isTeamsPage = () => {
       if (latest && latest.rawVtt) {
         console.log(`[Teams Chat Extractor] Using captured cdnmedia VTT (${latest.entryCount} entries, complete)`);
         return {
-          vtt: latest.rawVtt,
-          txt: convertVttToTxt(latest.rawVtt),
+          vtt: enrichVtt(latest.rawVtt),
+          txt: convertVttToTxt(enrichVtt(latest.rawVtt)),
           source: 'cdnmedia-vtt'
         };
       }
@@ -846,6 +867,13 @@ const isTeamsPage = () => {
     try {
       const data = await getTranscriptData();
       if (!data) UI.toast({ kind: 'error', title: 'Transcript not available', message: NOT_READY_MESSAGE });
+      else {
+        const coverage = transcript.speakerCoverage(data.vtt);
+        if (coverage.named < coverage.total) UI.toast({
+          kind: 'warning', title: 'Some speaker names are unavailable',
+          message: 'Open the Transcript tab so Teams loads the names, then export again.'
+        });
+      }
       return data;
     } catch (err) {
       UI.toast({ kind: 'error', title: 'Transcript not available', message: err.message || String(err) });
