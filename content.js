@@ -630,7 +630,8 @@ const isTeamsPage = () => {
       } else if (contentType.includes('json') || text.startsWith('{') || text.startsWith('[')) {
         try {
           const data = JSON.parse(text);
-          const entries = Array.isArray(data) ? data : (data.entries || data.captions || []);
+          const rawEntries = Array.isArray(data) ? data : (data.entries || data.captions || []);
+          const entries = transcript.resolveSpeakers(rawEntries, transcript.rosterFrom(data));
           if (entries.length > 0) {
             const utils = window.__teamsTranscriptUtils;
             if (utils) {
@@ -639,13 +640,13 @@ const isTeamsPage = () => {
             } else {
               txt = entries.map((e) => {
                 const ts = e.startOffset || e.offset || '00:00:00';
-                const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+                const speaker = transcript.entryName(e) || 'Unknown';
                 const content = e.text || e.content || '';
                 return `[${ts}] ${speaker}: ${content}`;
               }).join('\n');
               vtt = 'WEBVTT\n\n' + entries.map((e, i) => {
                 const ts = e.startOffset || e.offset || '00:00:00';
-                const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+                const speaker = transcript.entryName(e) || 'Unknown';
                 const content = e.text || e.content || '';
                 return `${i + 1}\n${ts}.000 --> ${ts}.000\n<v ${speaker}>${content}</v>`;
               }).join('\n\n');
@@ -748,10 +749,10 @@ const isTeamsPage = () => {
 
       // Case B: JSON entries captured
       if (latest && latest.entries && latest.entries.length > 0 && utils) {
-        const entries = latest.entries.map((e, i) => ({
+        const entries = transcript.resolveSpeakers(latest.entries).map((e, i) => ({
           startOffset: e.startOffset || e.offset || (utils.parsePTDuration ? utils.parsePTDuration(e.timestamp) : '00:00:00'),
           endOffset: e.endOffset || e.startOffset || '00:00:00',
-          speakerDisplayName: e.speakerDisplayName || e.speaker || 'Unknown',
+          speakerDisplayName: transcript.entryName(e) || 'Unknown',
           text: e.text || e.content || '',
           id: e.entryId || `captured-${i + 1}`
         })).filter(e => e.text.trim());

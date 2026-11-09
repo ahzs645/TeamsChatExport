@@ -52,5 +52,67 @@
     const cues = blocks(vtt).map(cue).filter(Boolean);
     return { total: cues.length, named: cues.filter(c => voice(c.payload)).length };
   };
-  globalThis.__tceTranscript = { speakerMap, enrichVtt, convertVttToTxt, speakerCoverage };
+  // --- Entry-level speaker resolution (JSON / React-state transcripts) ---
+  // Teams leaves speakerDisplayName empty on some entries (seen with guests and
+  // people from other organisations) while still giving their speakerId. Names
+  // are only ever copied between entries with the same speakerId, or taken from
+  // a roster Teams itself supplied for that ID, so nothing is guessed.
+  const isUnknownName = (name) => typeof name !== 'string' || !name.trim()
+    || /^Unknown(?: speaker)?$/i.test(name.trim());
+  const entryName = (e) => {
+    if (!e || typeof e !== 'object') return '';
+    const s = e.speaker;
+    const candidates = [e.speakerDisplayName, e.speakerName, e.displayName, e.userDisplayName,
+      s && typeof s === 'object' ? (s.displayName || s.name) : s];
+    return candidates.find(n => !isUnknownName(n))?.trim() || '';
+  };
+  const entrySpeakerId = (e) => {
+    if (!e || typeof e !== 'object') return '';
+    const s = e.speaker;
+    const id = e.speakerId || e.userId || (s && typeof s === 'object' ? (s.id || s.userId) : '');
+    return typeof id === 'string' ? id : '';
+  };
+  // Roster from a transcript JSON document: events (join/leave) and any
+  // speakers/participants list, mapped speakerId -> display name.
+  const rosterFrom = (data) => {
+    const roster = Object.create(null);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return roster;
+    for (const key of ['events', 'speakers', 'participants', 'attendees']) {
+      const list = Array.isArray(data[key]) ? data[key] : [];
+      for (const item of list) {
+        const id = entrySpeakerId(item) || (typeof item?.id === 'string' && key !== 'events' ? item.id : '');
+        const name = entryName(item);
+        if (id && name && !roster[id]) roster[id] = name;
+      }
+    }
+    return roster;
+  };
+  const resolveSpeakers = (entries, roster = {}) => {
+    if (!Array.isArray(entries)) return [];
+    const byId = Object.create(null);
+    for (const [id, name] of Object.entries(roster || {})) if (!isUnknownName(name)) byId[id] = name;
+    for (const e of entries) {
+      const id = entrySpeakerId(e), name = entryName(e);
+      if (id && name && !byId[id]) byId[id] = name;
+    }
+    return entries.map((e) => {
+      if (!e || typeof e !== 'object') return e;
+      const name = entryName(e) || byId[entrySpeakerId(e)] || '';
+      return name === e.speakerDisplayName ? e : { ...e, speakerDisplayName: name || e.speakerDisplayName };
+    });
+  };
+  // Key names only (never transcript text or names) to help diagnose missing speakers.
+  const describeUnnamed = (entries) => {
+    const unnamed = (entries || []).filter(e => e && typeof e === 'object' && !entryName(e));
+    if (!unnamed.length) return null;
+    return {
+      unnamed: unnamed.length, total: entries.length,
+      keys: Object.keys(unnamed[0]).sort(),
+      withSpeakerId: unnamed.filter(e => entrySpeakerId(e)).length
+    };
+  };
+  globalThis.__tceTranscript = {
+    speakerMap, enrichVtt, convertVttToTxt, speakerCoverage,
+    isUnknownName, entryName, entrySpeakerId, rosterFrom, resolveSpeakers, describeUnnamed
+  };
 })();

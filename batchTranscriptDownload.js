@@ -286,7 +286,8 @@
 			} else if (contentType.includes('json') || text.startsWith('{') || text.startsWith('[')) {
 				try {
 					const data = JSON.parse(text);
-					const entries = Array.isArray(data) ? data : (data.entries || data.captions || []);
+					const rawEntries = Array.isArray(data) ? data : (data.entries || data.captions || []);
+					const entries = window.__tceTranscript.resolveSpeakers(rawEntries, window.__tceTranscript.rosterFrom(data));
 					if (entries.length > 0) {
 						const utils = window.__teamsTranscriptUtils;
 						if (utils) {
@@ -295,13 +296,13 @@
 						} else {
 							txt = entries.map((e) => {
 								const ts = e.startOffset || e.offset || '00:00:00';
-								const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+								const speaker = window.__tceTranscript.entryName(e) || 'Unknown';
 								const content = e.text || e.content || '';
 								return `[${ts}] ${speaker}: ${content}`;
 							}).join('\n');
 							vtt = 'WEBVTT\n\n' + entries.map((e, i) => {
 								const ts = e.startOffset || e.offset || '00:00:00';
-								const speaker = e.speakerDisplayName || e.speaker || 'Unknown';
+								const speaker = window.__tceTranscript.entryName(e) || 'Unknown';
 								const content = e.text || e.content || '';
 								return `${i + 1}\n${ts}.000 --> ${ts}.000\n<v ${speaker}>${content}</v>`;
 							}).join('\n\n');

@@ -18,6 +18,7 @@ On a meeting recording (Teams recap, SharePoint or Stream `stream.aspx` page):
 Open the **Transcript** tab before exporting so Teams loads the speaker names.
 The exporter matches names to subtitle cue IDs, keeping the original subtitle timestamps.
 If Teams supplies no matching speaker data, those cues remain unlabelled; names are never guessed.
+Guests and people from other organisations are named too: when Teams leaves a name out of its data, the exporter uses the name Teams gives the same speaker elsewhere (another line, the meeting roster, or the name shown in the Transcript tab). Scrolling through the Transcript tab once helps if any lines are still unlabelled.
 If the transcript is not ready yet, play the recording for a few seconds so Teams loads it.
 
 ### Meeting recordings

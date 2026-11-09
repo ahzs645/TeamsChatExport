@@ -23,6 +23,73 @@ const withNotes = 'WEBVTT\n\nNOTE metadata\nignore me\n\nSTYLE\n::cue { color: r
 assert.equal(convertVttToTxt(withNotes), '[00:00:00] Speaker: Hi\nthere', 'Ignore metadata and accept an unclosed WebVTT voice span');
 assert.match(enrichVtt(raw, { 'meeting/9': 'A <B> & C\nD' }), /<v A &lt;B&gt; &amp; C D>/, 'Escape voice annotations');
 
+// Guests / people from other organisations: Teams can leave speakerDisplayName
+// empty (or omit it) while still giving speakerId.
+const { resolveSpeakers, rosterFrom, entryName } = context.__tceTranscript;
+const guestEntries = [
+  { id: 'm/1', speakerId: 'guest-1', text: 'Hi from outside', startOffset: '00:00:01' },
+  { id: 'm/2', speakerId: 'staff-1', speakerDisplayName: 'Pat Staff', text: 'Hello', startOffset: '00:00:02' },
+  { id: 'm/3', speakerId: 'guest-1', speakerDisplayName: 'Gail Guest (External)', text: 'Again', startOffset: '00:00:03' },
+  { id: 'm/4', speakerId: 'guest-2', speakerDisplayName: null, text: 'No roster', startOffset: '00:00:04' }
+];
+const resolvedGuests = resolveSpeakers(guestEntries);
+assert.deepEqual(resolvedGuests.map(e => e.speakerDisplayName), ['Gail Guest (External)', 'Pat Staff', 'Gail Guest (External)', null], 'Names copied only within the same speakerId');
+const roster = rosterFrom({ entries: guestEntries, events: [{ eventType: 'JoinedConversation', userId: 'guest-2', userDisplayName: 'Gus Guest' }] });
+assert.equal(resolveSpeakers(guestEntries, roster)[3].speakerDisplayName, 'Gus Guest', 'Transcript event roster names guests');
+assert.equal(entryName({ speaker: { displayName: 'Nested Name' } }), 'Nested Name');
+assert.equal(entryName({ speakerDisplayName: 'Unknown', speakerId: 'x' }), '');
+
+// Recap page React state where the first entry is a guest without speakerDisplayName.
+{
+  const reactEntries = [
+    { entryId: 'meeting/1', speakerId: 'guest-1', text: 'Guest speaks first', timestamp: 'PT1S' },
+    { entryId: 'meeting/2', speakerId: 'staff-1', speakerDisplayName: 'Pat Staff', text: 'Staff reply', timestamp: 'PT5S' },
+    { entryId: 'meeting/3', speakerId: 'guest-1', text: 'Guest again', timestamp: 'PT9S' }
+  ];
+  const listEl = { __reactFiber$x: { memoizedState: { memoizedState: reactEntries, next: null }, return: null } };
+  const row = (label, text) => ({
+    getAttribute: () => label,
+    querySelector: () => ({ textContent: text })
+  });
+  let rows = [];
+  const divs = {};
+  const doc = {
+    body: { appendChild(el) { divs[el.id] = el; } },
+    documentElement: {},
+    querySelector: (sel) => sel === '.ms-List' ? listEl : null,
+    querySelectorAll: (sel) => sel === '[role="group"]' ? rows : [],
+    getElementById: (id) => divs[id] || null,
+    addEventListener() {},
+    createElement: () => {
+      const attrs = {};
+      return { style: {}, setAttribute(k, v) { attrs[k] = v; }, getAttribute: k => attrs[k], set id(v) { this._id = v; }, get id() { return this._id; } };
+    }
+  };
+  const page = vm.createContext({ console: { log() {}, warn() {} }, document: doc, setInterval() {}, MutationObserver: class { observe() {} } });
+  page.window = page;
+  page.fetch = async () => ({});
+  vm.runInContext(fs.readFileSync(new URL('../../transcriptUtils.js', import.meta.url), 'utf8'), page);
+  vm.runInContext(fs.readFileSync(new URL('../../transcriptFetchOverride.js', import.meta.url), 'utf8'), page);
+  const utils = page.__teamsTranscriptUtils;
+  let entries = utils.extractFromDOM();
+  assert.equal(entries.length, 3, 'React state found even when the first speaker has no display name');
+  assert.equal(entries[1].speakerDisplayName, 'Pat Staff', 'Organisation staff keep their names');
+  // Teams renders the guest's name on screen; learn it for that speakerId.
+  rows = [row('Gail Guest (External) 1 second', 'Guest speaks first')];
+  entries = utils.extractFromDOM();
+  assert.deepEqual(entries.map(e => e.speakerDisplayName), ['Gail Guest (External)', 'Pat Staff', 'Gail Guest (External)']);
+  rows = [];
+  entries = utils.extractFromDOM();
+  assert.equal(entries[2].speakerDisplayName, 'Gail Guest (External)', 'Learned names persist after scrolling away');
+  const names = speakerMap(utils.buildVttTranscript(entries));
+  assert.equal(names['meeting/1'], 'Gail Guest (External)');
+  assert.equal(names['meeting/2'], 'Pat Staff');
+  const rawVtt = 'WEBVTT\n\nmeeting/1-0\n00:00:01.000 --> 00:00:04.000\nGuest speaks first\n\nmeeting/2-0\n00:00:05.000 --> 00:00:08.000\nStaff reply';
+  assert.equal(convertVttToTxt(enrichVtt(rawVtt, names)), '[00:00:01] Gail Guest (External): Guest speaks first\n[00:00:05] Pat Staff: Staff reply');
+  // Unresolved speakers never leak a raw speakerId into the name.
+  assert.ok(!utils.buildVttTranscript([{ id: 'x/1', speakerId: 'guest-9', text: 'hi', startOffset: '00:00:01' }]).includes('guest-9'));
+}
+
 // Exercise the actual background message relay with a transcript frame reply.
 const listeners = [];
 const background = vm.createContext({

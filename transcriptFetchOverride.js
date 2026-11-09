@@ -8,7 +8,13 @@
 	const { fetch: originalFetch } = window;
 	const hiddenDivId = 'teams-chat-exporter-transcript-data';
 	let domExtractionInterval = null;
-	let lastExtractedCount = 0;
+	let lastExtractedSignature = '';
+	const T = () => globalThis.__tceTranscript;
+	// Names learned from rendered transcript rows, kept for this page only.
+	// speakerId -> name, and entry id -> name for entries without a speakerId.
+	const learnedSpeakerNames = Object.create(null);
+	const learnedEntryNames = Object.create(null);
+	let lastDiagnostic = '';
 
 	const ensureHiddenDiv = () => {
 		const existing = document.getElementById(hiddenDivId);
@@ -76,6 +82,17 @@
 		return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 	};
 
+	// A transcript entry list: the first few items carry text, a time and some
+	// speaker field. Entries spoken by guests or people outside the organisation
+	// can lack speakerDisplayName entirely, so don't require it on the first item.
+	const isTranscriptEntryArray = (mem) => {
+		if (!Array.isArray(mem) || mem.length === 0) return false;
+		const sample = mem.slice(0, 5).filter(e => e && typeof e === 'object');
+		if (!sample.length) return false;
+		return sample.every(e => typeof e.text === 'string' && ('timestamp' in e || 'startOffset' in e))
+			&& sample.some(e => 'speakerDisplayName' in e || 'speakerId' in e || 'speaker' in e);
+	};
+
 	// Extract complete transcript from React fiber state (all entries, not just visible)
 	const extractFromReactState = () => {
 		// Try multiple starting elements - the data lives deep in the tree
@@ -105,17 +122,15 @@
 				let hookIdx = 0;
 				while (hookState && hookIdx < 30) {
 					const mem = hookState.memoizedState;
-					if (Array.isArray(mem) && mem.length > 0) {
-						const sample = mem[0];
-						if (sample && sample.speakerDisplayName !== undefined && sample.text !== undefined && sample.timestamp !== undefined) {
-							return mem.map((entry, index) => ({
-								startOffset: parsePTDuration(entry.timestamp),
-								endOffset: parsePTDuration(entry.timestamp),
-								speakerDisplayName: entry.speakerDisplayName || 'Unknown',
-								text: entry.text || '',
-								id: entry.entryId || `react-${index + 1}`
-							})).filter(e => e.text.trim());
-						}
+					if (isTranscriptEntryArray(mem)) {
+						return mem.map((entry, index) => ({
+							startOffset: entry.timestamp ? parsePTDuration(entry.timestamp) : toSimpleTimestamp(entry.startOffset),
+							endOffset: entry.timestamp ? parsePTDuration(entry.timestamp) : toSimpleTimestamp(entry.endOffset || entry.startOffset),
+							speakerDisplayName: T()?.entryName(entry) || '',
+							speakerId: T()?.entrySpeakerId(entry) || '',
+							text: entry.text || '',
+							id: entry.entryId || entry.id || `react-${index + 1}`
+						})).filter(e => e.text.trim());
 					}
 					hookState = hookState.next;
 					hookIdx++;
@@ -127,16 +142,9 @@
 		return null;
 	};
 
-	// Extract transcript entries from DOM (fallback for visible entries only)
-	const extractFromDOM = () => {
-		// Try React state first for complete transcript
-		const reactEntries = extractFromReactState();
-		if (reactEntries && reactEntries.length > 0) {
-			console.log(`[Teams Chat Exporter] Extracted ${reactEntries.length} entries from React state (complete)`);
-			return reactEntries;
-		}
-
-		// Fallback: DOM extraction (visible entries only)
+	// Visible transcript rows as rendered by Teams (the virtualised list only
+	// renders what is on screen).
+	const extractVisibleRows = () => {
 		const entries = [];
 		const groups = document.querySelectorAll('[role="group"]');
 
@@ -170,6 +178,60 @@
 		return entries;
 	};
 
+	const normText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+
+	// When Teams shows a name on screen for an entry its data left unnamed,
+	// remember it. A row only counts as the same entry when its text is identical
+	// and its time is within a second; the name then applies to that entry and,
+	// via speakerId, to that same person's other entries.
+	const learnNamesFromRows = (entries) => {
+		const t = T();
+		if (!t) return;
+		const unnamed = entries.filter(e => !e.speakerDisplayName);
+		if (!unnamed.length) return;
+		const rows = extractVisibleRows().filter(r => !t.isUnknownName(r.speakerDisplayName));
+		if (!rows.length) return;
+		const byText = new Map();
+		for (const r of rows) {
+			const key = normText(r.text);
+			byText.set(key, byText.has(key) ? null : r); // ambiguous duplicates are ignored
+		}
+		for (const e of unnamed) {
+			const row = byText.get(normText(e.text));
+			if (!row) continue;
+			if (Math.abs(timestampToSeconds(row.startOffset) - timestampToSeconds(e.startOffset || '00:00:00')) > 1) continue;
+			if (e.speakerId) learnedSpeakerNames[e.speakerId] = learnedSpeakerNames[e.speakerId] || row.speakerDisplayName;
+			else learnedEntryNames[e.id] = row.speakerDisplayName;
+		}
+	};
+
+	const resolveNames = (entries, roster = {}) => {
+		const t = T();
+		if (!t) return entries;
+		learnNamesFromRows(t.resolveSpeakers(entries, roster));
+		const resolved = t.resolveSpeakers(entries, { ...learnedSpeakerNames, ...roster })
+			.map(e => (!e.speakerDisplayName && learnedEntryNames[e.id]) ? { ...e, speakerDisplayName: learnedEntryNames[e.id] } : e);
+		const diag = t.describeUnnamed(resolved);
+		const diagKey = diag ? JSON.stringify(diag) : '';
+		if (diag && diagKey !== lastDiagnostic) {
+			console.warn('[Teams Chat Exporter] Transcript entries without a speaker name (field names only):', diag);
+		}
+		lastDiagnostic = diagKey;
+		return resolved;
+	};
+
+	// Extract transcript entries from DOM (fallback for visible entries only)
+	const extractFromDOM = () => {
+		// Try React state first for complete transcript
+		const reactEntries = extractFromReactState();
+		if (reactEntries && reactEntries.length > 0) {
+			return resolveNames(reactEntries);
+		}
+
+		// Fallback: DOM extraction (visible entries only)
+		return extractVisibleRows();
+	};
+
 	const buildVttTranscript = (entries) => {
 		if (!Array.isArray(entries) || entries.length === 0) {
 			return 'WEBVTT\n\nNOTE Transcript not available.';
@@ -201,7 +263,7 @@
 			const endSecs = endSeconds % 60;
 			const end = `${String(endHours).padStart(2, '0')}:${String(endMins).padStart(2, '0')}:${String(endSecs).padStart(2, '0')}.000`;
 
-			const speaker = entry.speakerDisplayName || entry.speakerId || 'Unknown speaker';
+			const speaker = T()?.entryName(entry) || 'Unknown speaker';
 			const text = entry.text || '';
 
 			const cueId = entry.id || `${index + 1}`;
@@ -225,7 +287,7 @@
 
 		const lines = sorted.map((entry) => {
 			const timestamp = toSimpleTimestamp(entry.startOffset);
-			const speaker = entry.speakerDisplayName || entry.speakerId || 'Unknown';
+			const speaker = T()?.entryName(entry) || 'Unknown';
 			const text = entry.text || '';
 
 			return `[${timestamp}] ${speaker}: ${text}`;
@@ -258,9 +320,12 @@
 		const checkDOM = () => {
 			const entries = extractFromDOM();
 
-			// Only update if we found entries and count changed (transcript may load progressively)
-			if (entries.length > 0 && entries.length !== lastExtractedCount) {
-				lastExtractedCount = entries.length;
+			// Only update when the entry count or the number of named entries changes
+			// (the transcript loads progressively and names can be learned on scroll)
+			const named = entries.filter(e => !T()?.isUnknownName(e.speakerDisplayName)).length;
+			const signature = `${entries.length}:${named}`;
+			if (entries.length > 0 && signature !== lastExtractedSignature) {
+				lastExtractedSignature = signature;
 				storeTranscript(entries, 'DOM');
 			}
 		};
@@ -301,7 +366,8 @@
 			clone.json()
 				.then((data) => {
 					if (data.entries && Array.isArray(data.entries)) {
-						storeTranscript(data.entries, 'fetch');
+						const roster = T()?.rosterFrom(data) || {};
+						storeTranscript(T() ? T().resolveSpeakers(data.entries, roster) : data.entries, 'fetch');
 					}
 				})
 				.catch(() => {}); // Silently fail if not JSON
@@ -317,6 +383,7 @@
 	window.__teamsTranscriptUtils = {
 		extractFromDOM,
 		extractFromReactState,
+		resolveNames,
 		buildVttTranscript,
 		buildTxtTranscript,
 		parseTimestampFromLabel,
