@@ -1,8 +1,10 @@
 name: Release
 
-# Push a tag like v6.7 to publish a release with a ready-to-load extension zip.
-# The release notes are the tag's annotation message.
+# Publishes a release named after manifest.json's version (e.g. v6.7), with a
+# ready-to-load extension zip and notes from .github/release-notes/<tag>.md.
+# Run it from the Actions tab ("Run workflow"), or push a matching v* tag.
 on:
+  workflow_dispatch:
   push:
     tags: ['v*']
 
@@ -17,21 +19,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check manifest version matches tag
+      - name: Work out the tag
         run: |
-          version=$(jq -r .version manifest.json)
-          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "manifest.json is $version but tag is $GITHUB_REF_NAME"; exit 1; }
+          tag="v$(jq -r .version manifest.json)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "manifest.json says $tag but the pushed tag is $GITHUB_REF_NAME"; exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Build extension zip
         run: |
-          zip -r "TeamsChatExport-$GITHUB_REF_NAME.zip" . \
+          zip -r "TeamsChatExport-$TAG.zip" . \
             -x '.git/*' '.github/*' 'scripts/*' 'node_modules/*' '*.zip' '.gitignore' '.DS_Store'
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --force --tags
-          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
-          gh release create "$GITHUB_REF_NAME" "TeamsChatExport-$GITHUB_REF_NAME.zip" \
-            --title "Teams Chat Exporter $GITHUB_REF_NAME" --notes-file notes.md
+          notes=".github/release-notes/$TAG.md"
+          if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
+          gh release create "$TAG" "TeamsChatExport-$TAG.zip" \
+            --title "Teams Chat Exporter $TAG" --target "$GITHUB_SHA" "$@"
