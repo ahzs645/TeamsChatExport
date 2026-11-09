@@ -1,0 +1,37 @@
+name: Release
+
+# Push a tag like v6.7 to publish a release with a ready-to-load extension zip.
+# The release notes are the tag's annotation message.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check manifest version matches tag
+        run: |
+          version=$(jq -r .version manifest.json)
+          [ "v$version" = "$GITHUB_REF_NAME" ] || { echo "manifest.json is $version but tag is $GITHUB_REF_NAME"; exit 1; }
+
+      - name: Build extension zip
+        run: |
+          zip -r "TeamsChatExport-$GITHUB_REF_NAME.zip" . \
+            -x '.git/*' '.github/*' 'scripts/*' 'node_modules/*' '*.zip' '.gitignore' '.DS_Store'
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force --tags
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
+          gh release create "$GITHUB_REF_NAME" "TeamsChatExport-$GITHUB_REF_NAME.zip" \
+            --title "Teams Chat Exporter $GITHUB_REF_NAME" --notes-file notes.md
