@@ -1,3 +1,5 @@
 node_modules/
 *.backup
 .DS_Store
+scripts/teams-injected/out/
+/test.zip
