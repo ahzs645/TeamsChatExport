@@ -34,15 +34,17 @@ The popup follows your system's light or dark theme.
 
 ## Installation
 
-The extension is not on the Chrome Web Store; load it unpacked:
+Load the extension unpacked in Chrome or Edge.
 
-1. Download or clone this repository.
+1. From a repository checkout, run `node scripts/build.mjs` to generate `build/`. If you downloaded a release ZIP, extract it to a folder.
 2. Open `chrome://extensions/` in Chrome (or another Chromium browser such as Edge).
 3. Turn on **Developer mode** (top right).
-4. Click **Load unpacked** and select the repository folder (the one that contains `manifest.json`).
+4. Click **Load unpacked** and select `build/` or the extracted release folder containing `manifest.json`.
 5. Pin **Teams Chat Exporter** from the extensions menu so its icon is always visible.
 
 After installing or updating, reload any Teams tabs that were already open.
+
+See the [chat export troubleshooting guide](TROUBLESHOOTING.md) for version checks, scrolling fallback, and HAR and console diagnostics.
 
 ## Usage
 
@@ -58,7 +60,7 @@ After installing or updating, reload any Teams tabs that were already open.
 
 ## Development
 
-There is no build step. Edit the files and click the reload button for the extension on `chrome://extensions/`.
+After editing the source, run `node scripts/build.mjs` to refresh the same `build/` folder. Then reload the extension on `chrome://extensions/` and refresh the Teams tab. The release workflow uses the same build folder for its ZIP.
 
 | File | Purpose |
 | --- | --- |

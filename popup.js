@@ -47,10 +47,21 @@ document.addEventListener('DOMContentLoaded', () => {
   // Messaging helpers
   // ---------------------------------------------------------------------------
 
-  const classifyUrl = (url = '') => {
-    if (url.includes('teams.microsoft.com') || url.includes('teams.cloud.microsoft')) return 'teams';
-    if (url.includes('sharepoint.com') || url.includes('stream.aspx')) return 'stream';
-    return 'other';
+  const classifyUrl = (url) => {
+    try {
+      const { protocol, hostname } = new URL(url);
+      if (protocol !== 'https:' && protocol !== 'http:') return { site: 'other' };
+      const isTeamsCloud = hostname === 'teams.cloud.microsoft';
+      if (isTeamsCloud || hostname === 'teams.microsoft.com' || hostname.endsWith('.teams.microsoft.com')) {
+        return { site: 'teams', isTeamsCloud };
+      }
+      if (hostname === 'sharepoint.com' || hostname.endsWith('.sharepoint.com') || url.includes('stream.aspx')) {
+        return { site: 'stream' };
+      }
+    } catch (error) {
+      return { site: 'other' };
+    }
+    return { site: 'other' };
   };
 
   const getActiveTab = () => new Promise((resolve) => {
@@ -219,8 +230,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let hint = '';
     if (m.site === 'loading') hint = '';
     else if (m.site === 'other') hint = 'Open a chat in Microsoft Teams on the web to export it.';
-    else if (m.site !== 'teams') hint = 'Chat export works on teams.microsoft.com. Open the chat there.';
-    else if (!m.reachable) hint = "Can't reach this tab. Reload the Teams page, then open this popup again.";
+    else if (m.site !== 'teams') hint = 'Open a chat in Microsoft Teams on the web to export it.';
+    else if (!m.reachable) hint = "Check the extension’s site access for this Teams tab, then reload the page.";
     else if (!m.chatName) hint = 'Open a chat or channel in Teams first.';
 
     const data = {
@@ -353,6 +364,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const NO_CHAT = /^no chat (open|selected)$/i;
 
+  const recoveryAttempts = new Set();
+  const readTabState = (tabId) => Promise.all([
+    sendToTab(tabId, { action: 'getState' }, 3000),
+    sendToTab(tabId, { action: 'getTranscriptStatus' }, 3000),
+    sendToTab(tabId, { action: 'getVideoModules' }, 3000),
+  ]);
+
+  const reconnectCloudTab = async (tabId) => {
+    recoveryAttempts.add(tabId);
+    const target = { tabId };
+    try {
+      await chrome.scripting.executeScript({ target, files: ['content.js'] });
+      await chrome.scripting.insertCSS({ target, files: ['transcriptStyles.css'] });
+    } catch (error) {
+      console.warn('Teams tab could not be reconnected:', error.message);
+    }
+    return readTabState(tabId);
+  };
+
   let polling = false;
   const poll = async () => {
     if (polling) return;
@@ -360,7 +390,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const tab = await getActiveTab();
       currentTab = tab;
-      const site = classifyUrl(tab && tab.url);
+      const { site, isTeamsCloud } = classifyUrl(tab?.url);
       const next = {
         site,
         reachable: false,
@@ -372,11 +402,10 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       if (tab && site !== 'other') {
-        const [state, transcript, video] = await Promise.all([
-          sendToTab(tab.id, { action: 'getState' }, 3000),
-          sendToTab(tab.id, { action: 'getTranscriptStatus' }, 3000),
-          sendToTab(tab.id, { action: 'getVideoModules' }, 3000),
-        ]);
+        let [state, transcript, video] = await readTabState(tab.id);
+        if (isTeamsCloud && !state.ok && !transcript.ok && !video.ok && !recoveryAttempts.has(tab.id)) {
+          [state, transcript, video] = await reconnectCloudTab(tab.id);
+        }
         next.reachable = state.ok || transcript.ok || video.ok;
 
         const name = state.ok && state.response && typeof state.response.currentChat === 'string'
@@ -545,7 +574,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ---------------------------------------------------------------------------
 
   const DEFAULTS = { pageSize: 200, maxPages: 15 };
-  const FULL = { pageSize: 500, maxPages: 200 };
+  const FULL = { pageSize: Number(el.pageSize.max), maxPages: Number(el.maxPages.max) };
 
   el.settingsHeader.addEventListener('click', () => {
     const expanded = el.settingsHeader.getAttribute('aria-expanded') === 'true';
@@ -554,8 +583,8 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   const readInputs = () => ({
-    pageSize: parseInt(el.pageSize.value, 10) || DEFAULTS.pageSize,
-    maxPages: parseInt(el.maxPages.value, 10) || DEFAULTS.maxPages,
+    pageSize: Math.max(1, Math.min(FULL.pageSize, parseInt(el.pageSize.value, 10) || DEFAULTS.pageSize)),
+    maxPages: Math.max(1, Math.min(FULL.maxPages, parseInt(el.maxPages.value, 10) || DEFAULTS.maxPages)),
   });
 
   const updateReadout = () => {
@@ -568,13 +597,15 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.local.get(['teamsChatApiPageSize', 'teamsChatApiMaxPages'], (result) => {
       el.pageSize.value = result.teamsChatApiPageSize || DEFAULTS.pageSize;
       el.maxPages.value = result.teamsChatApiMaxPages || DEFAULTS.maxPages;
+      const { pageSize, maxPages } = readInputs();
+      el.pageSize.value = pageSize;
+      el.maxPages.value = maxPages;
       updateReadout();
     });
   };
 
   const saveSettings = () => {
-    const pageSize = Math.max(1, Math.min(500, parseInt(el.pageSize.value, 10) || DEFAULTS.pageSize));
-    const maxPages = Math.max(1, Math.min(200, parseInt(el.maxPages.value, 10) || DEFAULTS.maxPages));
+    const { pageSize, maxPages } = readInputs();
     el.pageSize.value = pageSize;
     el.maxPages.value = maxPages;
     chrome.storage.local.set({ teamsChatApiPageSize: pageSize, teamsChatApiMaxPages: maxPages });

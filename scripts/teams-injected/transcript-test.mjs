@@ -94,7 +94,7 @@ assert.equal(entryName({ speakerDisplayName: 'Unknown', speakerId: 'x' }), '');
 const listeners = [];
 const background = vm.createContext({
   chrome: {
-    webRequest: { onBeforeSendHeaders: { addListener() {} } },
+    webRequest: { onBeforeSendHeaders: { addListener() {} }, onCompleted: { addListener() {} } },
     runtime: { onMessage: { addListener(fn) { listeners.push(fn); } } },
     tabs: { sendMessage(tabId, request, callback) {
       assert.equal(tabId, 42);

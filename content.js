@@ -7,34 +7,43 @@
  * Also supports transcript extraction from Teams recordings and Microsoft Stream.
  */
 
-// === HELPER FUNCTIONS ===
-const isVideoPage = () => {
-  return window.location.href.includes('stream.aspx') ||
-         window.location.href.includes('/recordings/') ||
-         window.location.href.includes('streamContent') ||
-         document.querySelector('video[src*="stream"]') !== null;
-};
+(async () => {
+  // The toolbar popup can retry startup on Teams tabs that were already open.
+  if (globalThis.__tceContentStarted) return;
+  globalThis.__tceContentStarted = true;
 
-const isTeamsPage = () => {
-  return window.location.href.includes('teams.microsoft.com') ||
-         window.location.href.includes('teams.cloud.microsoft');
-};
+  const isVideoPage = () => {
+    return window.location.href.includes('stream.aspx') ||
+           window.location.href.includes('/recordings/') ||
+           window.location.href.includes('streamContent') ||
+           document.querySelector('video[src*="stream"]') !== null;
+  };
 
-// === IMMEDIATE SCRIPT INJECTION ===
-// Inject into page context immediately, before waiting for anything
-(() => {
+  const isTeamsPage = () => {
+    const { hostname } = window.location;
+    return hostname === 'teams.cloud.microsoft' || hostname === 'teams.microsoft.com' ||
+           hostname.endsWith('.teams.microsoft.com');
+  };
+
+  // Start the page-world helpers early. DOM chat export can still run when a
+  // site policy blocks those helpers.
   const injectScript = (url, name) => {
-    const script = document.createElement('script');
-    script.async = false;
-    script.src = chrome.runtime.getURL(url);
-    script.onload = () => {
-      console.log(`[Teams Chat Extractor] ${name} injected`);
-      script.remove();
-    };
-    script.onerror = (e) => {
-      console.error(`[Teams Chat Extractor] Failed to inject ${name}:`, e);
-    };
-    (document.head || document.documentElement).appendChild(script);
+    try {
+      const script = document.createElement('script');
+      script.async = false;
+      script.src = chrome.runtime.getURL(url);
+      script.onload = () => {
+        console.log(`[Teams Chat Extractor] ${name} injected`);
+        script.remove();
+      };
+      script.onerror = (error) => {
+        console.error(`[Teams Chat Extractor] Failed to inject ${name}:`, error);
+        script.remove();
+      };
+      (document.head || document.documentElement).appendChild(script);
+    } catch (error) {
+      console.error(`[Teams Chat Extractor] Failed to inject ${name}:`, error);
+    }
   };
 
   // Shared panel/toast helpers for page-world scripts (coordinator, manifestDownload).
@@ -90,9 +99,7 @@ const isTeamsPage = () => {
   }
 
   console.log('[Teams Chat Extractor] Content script starting...');
-})();
 
-(async () => {
   // Ensure body is ready when running at document_start
   if (!document.body) {
     await new Promise((resolve) => {
@@ -239,7 +246,7 @@ const isTeamsPage = () => {
       '[data-testid="intelligent-recap-instance-select-dropdown"], [aria-label="Transcript actions"], [aria-label="Audio recap"]'
     ),
     extractActiveChat: () => !!document.querySelector(
-      '[data-tid="message-pane-list-container"], [data-tid="chat-pane-message"], #message-list'
+      '[data-tid="message-pane-list-viewport"], [data-tid="message-pane-list-container"], [data-tid="chat-pane-message"], #message-list'
     )
   };
   /**
@@ -267,6 +274,9 @@ const isTeamsPage = () => {
   // --- Message Listener ---
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     switch (request.action) {
+      case 'chatHistoryRequestObserved':
+        console.info('[Teams native chat history]', JSON.stringify(request.summary));
+        return false;
       case 'getLocalTranscriptSpeakers': {
         const speakers = getLocalTranscriptSpeakers();
         // Only a frame with names responds; the top frame must not win with {}.
@@ -295,8 +305,8 @@ const isTeamsPage = () => {
         // Try multiple methods to get the chat name
         let currentChatName = null;
 
-        // Method 1: h2 element (common in many Teams versions)
-        const h2 = document.querySelector('h2');
+        // Prefer the active chat header on Teams cloud.
+        const h2 = document.querySelector('[id^="chat-header-"] h2') || document.querySelector('h2');
         if (h2 && h2.textContent) {
           const name = h2.textContent.trim();
           // Allow commas for "Last, First" format names
@@ -1107,20 +1117,25 @@ const isTeamsPage = () => {
       }
       return result;
     });
-    wrap(extractionEngine, 'scrollToLoadMessages', (orig) => function (...args) {
+    wrap(extractionEngine, 'scrollToLoadMessages', (orig) => async function (...args) {
       report('Scrolling to load older messages…');
+      if (IS_TOP_FRAME && window.location.hostname === 'teams.cloud.microsoft') {
+        const header = document.querySelector('[id^="chat-header-19:"]');
+        if (header) {
+          const chatId = header.id.slice('chat-header-'.length);
+          try {
+            const response = await chrome.runtime.sendMessage({ action: 'traceChatHistory', chatId });
+            if (response?.tracing) console.info('[Teams native chat history] Trace started');
+          } catch (error) {
+            console.warn('[Teams native chat history] Trace unavailable');
+          }
+        }
+      }
       return orig.apply(this, args);
     });
-    wrap(extractionEngine, 'extractMessagesFromDOM', (orig) => function (...args) {
-      const result = orig.apply(this, args);
-      if (Array.isArray(result)) {
-        count = result.length;
-        report(`Extracting chat… ${count.toLocaleString()} messages`);
-      }
-      return result;
-    });
     wrap(extractionEngine, 'embedAvatars', (orig) => function (messages, ...rest) {
-      report(`Preparing ${(messages?.length || count).toLocaleString()} messages…`);
+      count = messages.length;
+      report(`Preparing ${count.toLocaleString()} messages…`);
       return orig.call(this, messages, ...rest);
     });
 

@@ -52,10 +52,80 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ['requestHeaders']
 );
 
+const teamsCloudOrigin = 'https://teams.cloud.microsoft';
+const chatHistoryTraces = new Map();
+const historyRouteParts = new Set([
+  'api', 'mt', 'chatsvc', 'amer', 'emea', 'apac', 'v1', 'v2', 'beta', 'users', 'me',
+  'chats', 'chat', 'conversations', 'threads', 'messages', 'history', 'items', 'batch', '$batch',
+]);
+const historyQueryKeys = new Set(['view', 'pagesize', 'starttime', 'syncstate', '$top', 'before', 'anchor', 'skiptoken']);
+const genericHistoryRoute = /\/(?:\$?batch|messages|history|sync)(?:\/|$)/i;
+
+chrome.webRequest.onCompleted.addListener(details => {
+  if (!chatHistoryTraces.size || (details.initiator && details.initiator !== teamsCloudOrigin)) return;
+  const url = new URL(details.url);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    return;
+  }
+
+  for (const [tabId, trace] of chatHistoryTraces) {
+    if (details.timeStamp > trace.expiresAt) {
+      chatHistoryTraces.delete(tabId);
+      continue;
+    }
+    if (details.tabId !== tabId && details.tabId !== -1) continue;
+    const pathParts = pathname.split('/');
+    const identifiers = [...pathParts, ...url.searchParams.values()];
+    const sameChat = identifiers.includes(trace.chatId);
+    // A worker may omit the initiator, or issue a batched request without a
+    // chat ID in its URL. Only label requests as matched when the URL agrees.
+    if (!sameChat && (details.initiator !== teamsCloudOrigin || !genericHistoryRoute.test(pathname) ||
+        identifiers.some(value => value.startsWith('19:')))) continue;
+
+    const segments = pathParts.map(segment => {
+      if (segment === trace.chatId) return '{chatId}';
+      if (segment === '' || historyRouteParts.has(segment.toLowerCase())) return segment;
+      return '{value}';
+    });
+    const summary = {
+      method: details.method,
+      host: url.hostname,
+      route: segments.join('/'),
+      queryKeys: [...url.searchParams.keys()].filter(key => historyQueryKeys.has(key.toLowerCase())),
+      status: details.statusCode,
+      browserWorker: details.tabId === -1,
+      matchedChat: sameChat,
+    };
+    const key = JSON.stringify(summary);
+    if (trace.seen.has(key)) continue;
+    trace.seen.add(key);
+    chrome.tabs.sendMessage(tabId, { action: 'chatHistoryRequestObserved', summary }, { frameId: 0 }, () => {
+      if (chrome.runtime.lastError) chatHistoryTraces.delete(tabId);
+    });
+  }
+}, {
+  urls: ['https://teams.cloud.microsoft/*', 'https://*.teams.microsoft.com/*'],
+  types: ['xmlhttprequest', 'other'],
+});
+
 // Store transcript API metadata from any frame (top frame or iframe)
 const transcriptAPICache = {}; // { tabId: { metadata, tokens, transcriptData } }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'traceChatHistory') {
+    const tabId = sender.tab?.id;
+    if (sender.origin !== teamsCloudOrigin || sender.frameId !== 0 || !tabId ||
+        typeof request.chatId !== 'string' || !/^19:[\w@.:-]{10,200}$/i.test(request.chatId)) {
+      sendResponse({ tracing: false });
+      return false;
+    }
+    chatHistoryTraces.set(tabId, { chatId: request.chatId, expiresAt: Date.now() + 45_000, seen: new Set() });
+    sendResponse({ tracing: true });
+    return false;
+  }
   if (request.action === 'getTranscriptSpeakers') {
     const tabId = sender.tab?.id;
     if (!tabId) { sendResponse({ speakers: {} }); return false; }

@@ -22,7 +22,7 @@
     <!-- Chat export: primary on Teams chat pages -->
     <section class="card card-primary" id="chatCard" aria-labelledby="chatCardTitle">
       <h2 class="card-title" id="chatCardTitle">Export this chat</h2>
-      <p class="card-text">Collects every message in the open chat and opens it in the viewer, where you can save it as JSON, CSV, TXT or HTML.</p>
+      <p class="card-text">Opens the collected messages in the viewer, where you can save them as JSON, CSV, TXT or HTML.</p>
       <button type="button" class="btn btn-primary" id="extractActiveChatBtn" aria-describedby="extractHint">Extract this chat</button>
       <p class="hint" id="extractHint"></p>
     </section>
@@ -77,8 +77,8 @@
       </div>
       <div class="setting">
         <label for="pageSize">Messages per request</label>
-        <input type="number" id="pageSize" min="1" max="500" value="200" inputmode="numeric" aria-describedby="pageSizeHint">
-        <p class="hint" id="pageSizeHint">How many messages to fetch at a time (up to 500).</p>
+        <input type="number" id="pageSize" min="1" max="200" value="200" inputmode="numeric" aria-describedby="pageSizeHint">
+        <p class="hint" id="pageSizeHint">How many messages to fetch at a time (up to 200).</p>
       </div>
       <div class="setting">
         <label for="maxPages">Maximum requests</label>

@@ -94,7 +94,9 @@ export class ExtractionEngine {
     await this.delay(300);
 
     const bridgeData = this.readFromBridge();
-    let { token, conversationId, activeChatName } = bridgeData;
+    const { token, conversationId } = bridgeData;
+    let activeChatName = document.querySelector('[id^="chat-header-"] h2')?.textContent?.trim() ||
+      bridgeData.activeChatName;
 
     if (!activeChatName) {
       const selected = document.querySelector('[aria-selected="true"]');
@@ -111,36 +113,33 @@ export class ExtractionEngine {
 
     console.log(`Active chat: ${activeChatName}`);
 
-    let apiMessages = [];
+    let messages = [];
 
-    // Try API extraction first (works for v1)
+    // Try API extraction first when the active chat context is available.
     if (conversationId && token) {
-      console.log(`Conversation ID: ${conversationId.substring(0, 50)}...`);
-      console.log(`Token available (${token.length} chars)`);
       console.log("Trying API extraction...");
-      apiMessages = await this.apiMessageExtractor.fetchConversation(conversationId);
+      messages = await this.apiMessageExtractor.fetchConversation(conversationId);
+    } else {
+      console.info('[Teams Chat API] Skipped API export', { hasChatId: !!conversationId, hasAuth: !!token });
     }
 
-    // If API fails or returns nothing, try DOM extraction (works for v2)
-    if (apiMessages.length === 0) {
-      console.log("API returned no messages, trying DOM extraction (Teams v2 mode)...");
+    // Use the chat pane when the API is unavailable or returns no messages.
+    if (messages.length === 0) {
+      console.info('[Teams Chat Extractor] Using chat pane fallback');
 
-      // Scroll to load more messages first
-      await this.scrollToLoadMessages();
+      messages = await this.scrollToLoadMessages();
 
-      apiMessages = this.extractMessagesFromDOM();
-
-      if (apiMessages.length > 0) {
-        console.log(`Extracted ${apiMessages.length} messages via DOM`);
+      if (messages.length > 0) {
+        console.log(`Extracted ${messages.length} messages via DOM`);
       }
     }
 
-    if (apiMessages.length === 0) {
+    if (messages.length === 0) {
       console.error("No messages found via API or DOM.");
       return null;
     }
 
-    const preparedMessages = this.prepareMessages(this.mergeMessages(apiMessages));
+    const preparedMessages = this.prepareMessages(this.mergeMessages(messages));
     console.log(`Prepared ${preparedMessages.length} messages`);
 
     console.log("Embedding avatars...");
@@ -150,41 +149,80 @@ export class ExtractionEngine {
   }
 
   /**
-   * Scroll up in the chat to load more messages (for DOM extraction)
+   * Collect each visible window before Teams recycles its message rows.
    */
   async scrollToLoadMessages() {
-    const messageList = document.querySelector('[data-tid="message-pane-list-container"]') ||
+    const messageList = document.querySelector('[data-tid="message-pane-list-viewport"]') ||
+                       document.querySelector('[data-tid="message-pane-list-container"]') ||
                        document.querySelector('[role="main"] [data-virtualized]') ||
                        document.querySelector('#message-list');
+    if (!messageList) return this.extractMessagesFromDOM();
 
-    if (!messageList) {
-      console.log("Could not find message container for scrolling");
-      return;
+    const chatHeader = document.querySelector('[id^="chat-header-"]');
+    const chatId = chatHeader?.id;
+    const messages = new Map();
+    const distanceFromBottom = messageList.scrollHeight - messageList.clientHeight - messageList.scrollTop;
+    const collect = () => {
+      if (!messageList.isConnected || (chatHeader && (!chatHeader.isConnected || chatHeader.id !== chatId))) {
+        throw new Error('The open chat changed during extraction. Open the chat and try again.');
+      }
+      for (const message of this.extractMessagesFromDOM(messageList)) {
+        const key = message.id || `${message.timestamp}::${message.author}::${message.message}`;
+        if (!messages.has(key)) messages.set(key, message);
+      }
+    };
+
+    try {
+      collect();
+      if (distanceFromBottom > 1) {
+        messageList.scrollTop = messageList.scrollHeight;
+        await this.delay(100);
+        collect();
+      }
+      let historyLoads = 0;
+      for (let step = 0; step < 200 && historyLoads < 10; step++) {
+        const scrollStep = Math.max(1, Math.floor(messageList.clientHeight * 0.8));
+        const target = Math.max(0, messageList.scrollTop - scrollStep);
+        const heightBeforeScroll = messageList.scrollHeight;
+        messageList.scrollTop = target;
+        await this.delay(100);
+        collect();
+        if (target > 0) continue;
+
+        // Reaching the top can trigger an asynchronous history request.
+        historyLoads++;
+        const countAtTop = messages.size;
+        for (let attempt = 0; attempt < 6 && messageList.scrollTop <= 0 &&
+             messageList.scrollHeight === heightBeforeScroll && messages.size === countAtTop; attempt++) {
+          await this.delay(250);
+          collect();
+        }
+        if (messageList.scrollTop > 0) continue;
+        if (messageList.scrollHeight === heightBeforeScroll && messages.size === countAtTop) break;
+
+        // Some layouts stay pinned at the top when older rows arrive.
+        // Move a short distance so the next pass can reach the top again.
+        messageList.scrollTop = Math.min(40, scrollStep);
+        await this.delay(100);
+        collect();
+      }
+    } finally {
+      if (messageList.isConnected && (!chatHeader || (chatHeader.isConnected && chatHeader.id === chatId))) {
+        messageList.scrollTop = messageList.scrollHeight - messageList.clientHeight - distanceFromBottom;
+      }
     }
-
-    console.log("Scrolling to load more messages...");
-    const scrollAttempts = 10;
-
-    for (let i = 0; i < scrollAttempts; i++) {
-      messageList.scrollTop = 0;
-      await this.delay(300);
-
-      // Check if we've loaded more
-      const currentCount = document.querySelectorAll('[data-tid="chat-pane-message"]').length;
-      console.log(`Scroll ${i + 1}/${scrollAttempts}: ${currentCount} messages loaded`);
-    }
+    return messages.size ? Array.from(messages.values()) : this.extractMessagesFromDOM();
   }
 
   /**
    * Extract messages directly from DOM (Teams v2 fallback)
    */
-  extractMessagesFromDOM() {
-    const messageElements = document.querySelectorAll('[data-tid="chat-pane-message"]');
-    console.log(`Found ${messageElements.length} message elements in DOM`);
+  extractMessagesFromDOM(root = document) {
+    const messageElements = root.querySelectorAll('[data-tid="chat-pane-message"]');
 
     const messages = [];
 
-    messageElements.forEach((msg, index) => {
+    messageElements.forEach(msg => {
       try {
         const mid = msg.getAttribute('data-mid');
 
@@ -209,6 +247,8 @@ export class ExtractionEngine {
         if (timestampEl) {
           timestamp = timestampEl.getAttribute('datetime') || timestampEl.textContent?.trim() || '';
         }
+        const isoTimestamp = this.parseTimestamp(timestampEl?.getAttribute('datetime')) ||
+          (/^\d{13}$/.test(mid) ? new Date(Number(mid)).toISOString() : this.parseTimestamp(timestamp));
 
         // Try multiple methods to find content
         let content = '';
@@ -250,10 +290,10 @@ export class ExtractionEngine {
         // Only add if there's content
         if (content || attachments.length > 0 || embeddedImages.length > 0) {
           messages.push({
-            id: mid || `dom-${index}`,
+            id: mid || null,
             author,
             timestamp,
-            isoTimestamp: this.parseTimestamp(timestamp),
+            isoTimestamp,
             message: content,
             content,
             attachments,

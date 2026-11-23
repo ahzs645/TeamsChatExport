@@ -4,6 +4,9 @@
  * This is best-effort and gated via localStorage "teamsChatApiMode".
  */
 
+const TEAMS_CLOUD_HOST = 'teams.cloud.microsoft';
+const MAX_MESSAGES_PER_REQUEST = 200;
+
 export class ApiMessageExtractor {
   constructor() {
     this.cacheKey = '__teamsExtractorMessageApiCache';
@@ -12,6 +15,7 @@ export class ApiMessageExtractor {
   }
 
   readNumberSetting(key, { min = 1, max = 500, fallback }, storageValue = null) {
+    const defaultValue = Math.min(Math.max(fallback, min), max);
     try {
       // Prefer chrome.storage.local value if provided
       if (storageValue !== null && storageValue !== undefined) {
@@ -22,12 +26,12 @@ export class ApiMessageExtractor {
       }
       // Fallback to localStorage for backward compatibility
       const raw = localStorage.getItem(key);
-      if (!raw) return fallback;
+      if (!raw) return defaultValue;
       const n = parseInt(raw, 10);
-      if (Number.isNaN(n)) return fallback;
+      if (Number.isNaN(n)) return defaultValue;
       return Math.min(Math.max(n, min), max);
     } catch (_err) {
-      return fallback;
+      return defaultValue;
     }
   }
 
@@ -44,37 +48,39 @@ export class ApiMessageExtractor {
   }
 
   getHostAndRegion() {
-    const defaults = { host: 'teams.microsoft.com', region: 'amer' };
+    const legacyHost = 'teams.microsoft.com';
+    const host = window.location.hostname === TEAMS_CLOUD_HOST ? TEAMS_CLOUD_HOST : legacyHost;
+    const defaults = { host, legacyHost, region: 'amer', chatRegion: null };
     try {
-      const host = localStorage.getItem('teamsChatHostOverride') || defaults.host;
-      // Try to detect region from recent API calls
-      let region = localStorage.getItem('teamsChatRegionOverride');
-      if (!region) {
-        const perfEntries = performance?.getEntriesByType?.('resource') || [];
-        for (let i = perfEntries.length - 1; i >= 0; i--) {
-          const name = perfEntries[i].name || '';
-          // Check for /api/mt/{region}/ pattern (v2)
-          const mtMatch = name.match(/\/api\/mt\/([a-z]+)\//);
-          if (mtMatch) {
-            region = mtMatch[1];
-            break;
-          }
-          // Check for /chatsvc/{region}/ pattern (v1)
-          const chatsvcMatch = name.match(/\/chatsvc\/([a-z]+)\//);
-          if (chatsvcMatch) {
-            region = chatsvcMatch[1];
-            break;
-          }
+      const hostOverride = localStorage.getItem('teamsChatHostOverride');
+      const regionOverride = localStorage.getItem('teamsChatRegionOverride');
+      let region = regionOverride;
+      let chatRegion = regionOverride;
+      // Teams can route its web API and its chat history API to different regions.
+      const entries = globalThis.performance?.getEntriesByType?.('resource') || [];
+      const origin = `https://${hostOverride || host}/`;
+      for (let i = entries.length - 1; i >= 0 && (!region || !chatRegion); i--) {
+        const url = entries[i].name || '';
+        if (url.startsWith(origin)) {
+          const resourcePath = url.slice(origin.length);
+          region ||= resourcePath.match(/^api\/mt\/([a-z0-9-]+)\//i)?.[1];
+          chatRegion ||= resourcePath.match(/^api\/chatsvc\/([a-z0-9-]+)\//i)?.[1];
         }
       }
-      return { host, region: region || defaults.region };
+      return {
+        host: hostOverride || host,
+        legacyHost: hostOverride || legacyHost,
+        region: region || chatRegion || defaults.region,
+        chatRegion,
+      };
     } catch (_err) {
       return defaults;
     }
   }
 
   isTeamsV2() {
-    return window.location.href.includes('/v2/');
+    const { hostname, pathname } = window.location;
+    return hostname === TEAMS_CLOUD_HOST || pathname.includes('/v2/');
   }
 
   isEnabled() {
@@ -131,11 +137,11 @@ export class ApiMessageExtractor {
     const storageSettings = await this.loadStorageSettings();
 
     // Allow overrides via chrome.storage.local or localStorage
-    const effectivePageSize = this.readNumberSetting('teamsChatApiPageSize', { min: 1, max: 500, fallback: pageSize }, storageSettings.teamsChatApiPageSize);
+    const effectivePageSize = this.readNumberSetting('teamsChatApiPageSize', { min: 1, max: MAX_MESSAGES_PER_REQUEST, fallback: pageSize }, storageSettings.teamsChatApiPageSize);
     const effectiveMaxPages = this.readNumberSetting('teamsChatApiMaxPages', { min: 1, max: 200, fallback: maxPages }, storageSettings.teamsChatApiMaxPages);
     const effectiveStartTime = this.readNumberSetting('teamsChatApiStartTime', { min: 1, max: Number.MAX_SAFE_INTEGER, fallback: startTime }, storageSettings.teamsChatApiStartTime);
 
-    const { host, region } = this.getHostAndRegion();
+    const { host, legacyHost, region, chatRegion } = this.getHostAndRegion();
     const encodedId = encodeURIComponent(conversationId);
     const isV2 = this.isTeamsV2();
 
@@ -143,6 +149,19 @@ export class ApiMessageExtractor {
 
     // Build list of API endpoints to try
     const paths = [];
+    const historyQuery = new URLSearchParams({
+      view: 'msnp24Equivalent|supportsMessageProperties',
+      pageSize: String(effectivePageSize),
+      startTime: String(effectiveStartTime),
+    });
+    if (window.location.hostname === TEAMS_CLOUD_HOST) {
+      // Cloud Teams serves history on the same origin. Preserve explicit and
+      // observed chat regions, and try the Canadian route when only MT is visible.
+      const chatRegions = new Set(chatRegion ? [chatRegion] : [region, 'ca']);
+      for (const chatServiceRegion of chatRegions) {
+        paths.push(`https://${host}/api/chatsvc/${chatServiceRegion}/v1/users/ME/conversations/${encodedId}/messages?${historyQuery}`);
+      }
+    }
 
     if (isV2) {
       // Teams v2 API endpoints
@@ -155,14 +174,13 @@ export class ApiMessageExtractor {
     }
 
     // Always try v1 endpoints as fallback (they might still work)
-    const v1Base = `https://${host}/api/chatsvc/${region}/v1`;
+    const v1Base = `https://${legacyHost}/api/chatsvc/${chatRegion || region}/v1`;
     paths.push(
-      `${v1Base}/users/ME/conversations/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`,
-      `${v1Base}/threads/${encodedId}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize=${effectivePageSize}&startTime=${effectiveStartTime}`
+      `${v1Base}/users/ME/conversations/${encodedId}/messages?${historyQuery}`,
+      `${v1Base}/threads/${encodedId}/messages?${historyQuery}`,
     );
 
-    for (const path of paths) {
-      console.log(`[Teams Chat API] Trying: ${path.substring(0, 80)}...`);
+    for (const path of new Set(paths)) {
       const msgs = await this.fetchPaged(path, { maxPages: effectiveMaxPages });
       if (msgs.length > 0) {
         console.log(`[Teams Chat API] Success with endpoint, got ${msgs.length} messages`);
@@ -177,7 +195,12 @@ export class ApiMessageExtractor {
   async fetchPaged(initialUrl, { maxPages = 15 } = {}) {
     const messages = [];
     const baseUrl = new URL(initialUrl);
-    let nextSyncState = baseUrl.searchParams.get('syncState') || null;
+    const endpoint = {
+      host: baseUrl.hostname,
+      route: baseUrl.pathname.includes('/api/mt/') ? 'v2' : 'v1',
+      region: baseUrl.pathname.split('/')[3],
+      pageSize: Number(baseUrl.searchParams.get('pageSize') || baseUrl.searchParams.get('$top')) || undefined,
+    };
 
     // Get token - try multiple sources
     console.log('[Teams Chat API] Looking for auth token...');
@@ -257,7 +280,7 @@ export class ApiMessageExtractor {
     if (token) {
       // Validate token audience before using
       if (!this.isValidTeamsToken(token)) {
-        console.warn('[Teams Chat API] Ignoring invalid token (wrong audience):', token.substring(0, 20) + '...');
+        console.warn('[Teams Chat API] Ignoring token for a different audience');
         token = null;
         try {
           window.localStorage.removeItem('teamsChatAuthToken');
@@ -291,21 +314,22 @@ export class ApiMessageExtractor {
     }
 
     let currentUrl = baseUrl.toString();
+    const visited = new Set([currentUrl]);
 
     for (let i = 0; i < maxPages; i++) {
       try {
-        console.log(`[Teams Chat API] Fetching page ${i + 1}...`);
         const resp = await fetch(currentUrl, {
           credentials: 'include',
           headers
         });
 
         if (resp.status === 401) {
-          console.error('[Teams Chat API] 401 Unauthorized. Token was:', token ? 'Present' : 'Missing');
           try { window.localStorage.removeItem('teamsChatAuthToken'); } catch (e) { }
         }
 
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const rejection = resp.ok ? undefined : await this.describeRejection(resp);
+        console.info('[Teams Chat API] HTTP response', JSON.stringify({ ...endpoint, page: i + 1, status: resp.status, rejection }));
+        if (!resp.ok) break;
         const data = await resp.json();
         const payloadMessages = this.extractFromPayload(data);
         payloadMessages.forEach((msg) => messages.push(msg));
@@ -316,30 +340,49 @@ export class ApiMessageExtractor {
           break;
         }
 
-        // Get next page URL - v1 uses syncState, v2 uses @odata.nextLink
-        const nextUrl = data?.syncState ||
-                       data?._metadata?.syncState ||
-                       data?.['@odata.nextLink'] ||
-                       data?.nextLink ||
-                       null;
+        // Fetch older history when the chat service supplies a backward link.
+        const continuation = data?._metadata?.backwardLink ||
+                             data?.backwardLink ||
+                             data?.syncState ||
+                             data?._metadata?.syncState ||
+                             data?.['@odata.nextLink'] ||
+                             data?.nextLink;
 
-        if (!nextUrl) {
+        if (!continuation) {
           console.log(`[Teams Chat API] No more pages`);
           break;
         }
 
-        // Use next URL directly
-        currentUrl = nextUrl;
+        const next = new URL(continuation, currentUrl);
+        // Do not forward the Teams session to a different service or chat.
+        if (next.origin !== baseUrl.origin || decodeURIComponent(next.pathname) !== decodeURIComponent(baseUrl.pathname) ||
+            visited.has(next.href)) break;
+        currentUrl = next.href;
+        visited.add(currentUrl);
       } catch (err) {
-        // Don't log 404s as warnings - they're expected when trying multiple endpoints
-        if (!err.message?.includes('404')) {
-          console.warn('[Teams Chat API] fetch error', currentUrl, err);
-        }
+        const reason = err instanceof SyntaxError ? 'Invalid JSON response' : 'Request or response processing failed';
+        console.warn('[Teams Chat API]', reason, JSON.stringify({ ...endpoint, page: i + 1 }));
         break;
       }
     }
 
     return this.sortAndDedup(messages);
+  }
+
+  async describeRejection(response) {
+    if (response.status === 401 || response.status === 403) return 'authorization';
+    if (response.status !== 400 || !response.headers.get('content-type')?.includes('json')) return undefined;
+
+    const payload = await response.json().catch(() => null);
+    // Map known errors to labels. Microsoft can echo conversation IDs or other
+    // request values in its error text, so never write the payload to the log.
+    const details = [payload?.error?.code, payload?.error?.message, payload?.errorCode, payload?.message]
+      .filter(value => typeof value === 'string').join(' ').toLowerCase();
+    if (/invalid.?conversation|invalid.?thread|conversation.?not.?found|thread.?not.?found/.test(details)) return 'conversation-id';
+    if (/invalid.?client|client.?version|unsupported.?version/.test(details)) return 'client-version';
+    if (/access.?denied|forbidden|unauthori[sz]ed|invalid.?token|authentication/.test(details)) return 'authorization';
+    if (/invalid.?parameter|pagesize|starttime|syncstate|query parameter/.test(details)) return 'history-parameters';
+    return 'unclassified-bad-request';
   }
 
   findTokenInStorage() {

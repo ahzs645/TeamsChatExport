@@ -158,7 +158,10 @@ async function panelChecks(browser, theme) {
   const { context, page } = await openHarness(browser, { theme });
   await page.locator('.tce-toolbar-btn[aria-label="Batch download all transcripts"]').click();
   await page.waitForSelector('#tce-batch-panel');
-  const focusIn = await page.evaluate(() => document.getElementById('tce-batch-panel').contains(document.activeElement) && document.activeElement.textContent);
+  // The panel moves focus on the next animation frame after it opens.
+  const focusedControl = page.locator('#tce-batch-panel :focus');
+  await focusedControl.waitFor({ state: 'attached', timeout: 1000 }).catch(() => {});
+  const focusIn = await focusedControl.count();
   check(`[${theme}] focus moves into batch panel on open`, !!focusIn, String(focusIn));
   await page.locator('#tce-batch-panel .tce-btn', { hasText: 'Start' }).click();
   await page.waitForFunction(() => !document.querySelector('#tce-batch-panel .tce-btn--primary[disabled]') || document.querySelector('#tce-batch-panel').textContent.includes('Ready to download'), null, { timeout: 5000 });

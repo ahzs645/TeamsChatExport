@@ -29,8 +29,9 @@ jobs:
 
       - name: Build extension zip
         run: |
-          zip -r "TeamsChatExport-$TAG.zip" . \
-            -x '.git/*' '.github/*' 'scripts/*' 'node_modules/*' '*.zip' '.gitignore' '.DS_Store'
+          node scripts/build.mjs
+          cd build
+          zip -r "../TeamsChatExport-$TAG.zip" .
 
       - name: Publish release
         env:
